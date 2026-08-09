@@ -1,0 +1,15 @@
+[Unit]
+Description=ExoCare Payment Webhook
+After=network.target
+
+[Service]
+Type=simple
+User=exocare
+WorkingDirectory=/opt/exocare
+EnvironmentFile=/opt/exocare/.env
+ExecStart=/opt/exocare/.venv/bin/python main.py webhook
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
