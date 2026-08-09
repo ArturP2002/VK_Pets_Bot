@@ -144,5 +144,11 @@ def test_start_payment_recurrent(memory_db):
 def test_complete_payment(memory_db):
     user = User.create(vk_id=999003, created_at=datetime.utcnow())
     pay = payment_service.start_payment(user, "starter", 1)
-    done = payment_service.complete_payment(order_id=pay.order_id)
+    done, newly = payment_service.complete_payment(order_id=pay.order_id)
+    assert done is not None
     assert done.status == "paid"
+    assert newly is True
+    again, newly2 = payment_service.complete_payment(order_id=pay.order_id)
+    assert again is not None
+    assert again.status == "paid"
+    assert newly2 is False

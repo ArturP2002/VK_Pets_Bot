@@ -42,6 +42,12 @@ TBANK_PASSWORD = os.getenv("TBANK_PASSWORD", "")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "http://localhost:5000")
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "5000"))
+# Deep link after payment SuccessURL/FailURL (browser → back to VK bot)
+VK_BOT_RETURN_URL = os.getenv("VK_BOT_RETURN_URL", "").strip()
+if not VK_BOT_RETURN_URL and VK_GROUP_ID:
+    VK_BOT_RETURN_URL = f"https://vk.me/club{VK_GROUP_ID}"
+elif not VK_BOT_RETURN_URL:
+    VK_BOT_RETURN_URL = "https://vk.com"
 
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "5"))
 

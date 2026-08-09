@@ -160,8 +160,8 @@ def _send_payment_ui(peer_id: int, vk_user_id: int, payment):
 
 
 def handle_pay_ok(peer_id: int, vk_user_id: int, order_id: str):
-    payment = payment_service.complete_payment(order_id=order_id)
-    if payment:
+    payment, newly_completed = payment_service.complete_payment(order_id=order_id)
+    if payment and newly_completed:
         user = payment.user
         sub = None
         if payment.tariff != "one_time":
@@ -186,6 +186,8 @@ def handle_pay_ok(peer_id: int, vk_user_id: int, order_id: str):
             )
         else:
             begin_one_time_consultation_flow(peer_id, vk_user_id, after_payment=True)
+    elif payment and not newly_completed:
+        vk.send_message(peer_id, "Эта оплата уже обработана.", back_menu_keyboard())
     session.clear_state(vk_user_id)
 
 

@@ -118,30 +118,56 @@ def complete_payment(
     *,
     rebill_id: str | None = None,
     card_mask: str | None = None,
-) -> Payment | None:
+) -> tuple[Payment | None, bool]:
+    """Mark payment paid and activate subscription.
+
+    Returns ``(payment, newly_completed)``. ``newly_completed`` is True only when
+    this call transitioned the payment from pending → paid (for webhook dedup).
+    """
     if order_id:
         payment = Payment.get_or_none(Payment.order_id == order_id)
     elif external_id:
         payment = Payment.get_or_none(Payment.external_id == external_id)
     else:
-        return None
+        return None, False
     if not payment:
-        return None
-    if payment.status == "paid":
-        return payment
-    payment.status = "paid"
-    payment.paid_at = datetime.utcnow()
+        return None, False
+
     meta = payment_meta(payment)
-    if rebill_id:
+    meta_changed = False
+    if rebill_id and not meta.get("rebill_id"):
         meta["rebill_id"] = rebill_id
-    if card_mask:
+        meta_changed = True
+    if card_mask and not meta.get("card_mask"):
         meta["card_mask"] = card_mask
-    payment.raw_json = json.dumps(meta, ensure_ascii=False)
-    payment.save()
+        meta_changed = True
+
+    if payment.status == "paid":
+        if meta_changed:
+            payment.raw_json = json.dumps(meta, ensure_ascii=False)
+            payment.save()
+        return payment, False
+
+    now = datetime.utcnow()
+    rows = (
+        Payment.update(
+            status="paid",
+            paid_at=now,
+            raw_json=json.dumps(meta, ensure_ascii=False),
+        )
+        .where((Payment.id == payment.id) & (Payment.status == "pending"))
+        .execute()
+    )
+    payment = Payment.get_by_id(payment.id)
+    if not rows:
+        return payment, False
+
     log_action(payment.user.vk_id, "payment_completed", "payment", payment.id)
     if payment.tariff != "one_time" and not payment.is_recurrent_charge:
-        subscription_service.activate_after_payment(payment, rebill_id=rebill_id, card_mask=card_mask)
-    return payment
+        subscription_service.activate_after_payment(
+            payment, rebill_id=rebill_id or meta.get("rebill_id"), card_mask=card_mask or meta.get("card_mask")
+        )
+    return payment, True
 
 
 def fail_payment(payment: Payment):

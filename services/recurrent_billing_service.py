@@ -217,8 +217,8 @@ def process_recurrent_charges():
             agreement.charge_retry_count += 1
             agreement.save()
             continue
-        completed = payment_service.complete_payment(order_id=payment.order_id)
-        if completed:
+        completed, newly_completed = payment_service.complete_payment(order_id=payment.order_id)
+        if completed and newly_completed:
             _extend_subscription(agreement, completed)
             chat_service.sync_chats_for_user(user)
             notification_service.queue_notification(
