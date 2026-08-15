@@ -5,8 +5,16 @@ __pycache__/
 *.py[cod]
 *.sqlite
 data/VK_Pets_DB.db
+data/VK_Pets_DB.db-shm
+data/VK_Pets_DB.db-wal
+data/formulary.db
+data/formulary.db-shm
+data/formulary.db-wal
+data/formulary_raw/
+data/chroma_formulary/
 data/uploads/*
 !data/uploads/.gitkeep
+knowledge_base/*.pdf
 .idea/
 *.log
 .pytest_cache/
@@ -14,3 +22,4 @@ data/uploads/*
 htmlcov/
 dist/
 build/
+ТЗ_бот_дозировки_и_калькулятор.docx

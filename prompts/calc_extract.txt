@@ -1,0 +1,20 @@
+Извлеки параметры для калькулятора дозы из свободного текста врача.
+Верни один JSON-объект со полями:
+{
+  "drug": string|null,
+  "species": string|null,
+  "weight_kg": number|null,
+  "dose_mg_per_kg": number|null,
+  "form": "tablet"|"solution"|"other"|null,
+  "mg_per_unit": number|null,
+  "concentration_mg_ml": number|null,
+  "route": string|null,
+  "notes": string|null,
+  "missing_fields": string[]
+}
+
+Правила:
+- не выдумывай dose_mg_per_kg: если во входе нет явной дозы мг/кг — поставь null;
+- missing_fields перечисли поля, без которых нельзя посчитать;
+- числа только из текста пользователя;
+- без markdown, только JSON.

@@ -7,6 +7,7 @@ from integrations.vk import keyboard_to_json
 from models import LegalDocument
 from services.subscription_catalog import (
     PLAN_ORDER,
+    ADDON_PLAN_ORDER,
     one_time_button_label,
     plan_button_label,
 )
@@ -36,6 +37,9 @@ def main_menu_keyboard() -> str:
     kb.add_line()
     kb.add_button("Рекомендуемые врачи", color=VkKeyboardColor.SECONDARY)
     kb.add_button("Партнёрские клиники", color=VkKeyboardColor.SECONDARY)
+    kb.add_line()
+    kb.add_button("Дозировки препаратов", color=VkKeyboardColor.PRIMARY)
+    kb.add_button("Калькулятор дозы", color=VkKeyboardColor.PRIMARY)
     kb.add_line()
     kb.add_button("Пробный период 5 дней", color=VkKeyboardColor.POSITIVE)
     kb.add_line()
@@ -112,6 +116,13 @@ def subscription_plans_keyboard() -> str:
         one_time_button_label(),
         payload={"cmd": "sub_plan", "plan": "one_time"},
     )
+    for plan in ADDON_PLAN_ORDER:
+        kb.add_line()
+        kb.add_callback_button(
+            plan_button_label(plan),
+            payload={"cmd": "sub_plan", "plan": plan},
+            color=VkKeyboardColor.POSITIVE,
+        )
     return keyboard_to_json(kb)
 
 
@@ -262,3 +273,73 @@ def doctor_ticket_keyboard(ticket_number: int) -> str:
         payload={"cmd": "doc_complete", "number": ticket_number},
     )
     return keyboard_to_json(kb)
+
+
+def dosage_candidates_keyboard(hits: list) -> str:
+    buttons = [
+        (
+            f"{h.display_name}"[:40],
+            {"cmd": "dosage_pick", "drug_id": h.drug_id},
+        )
+        for h in hits[:8]
+    ]
+    return inline_grid_keyboard(buttons, columns=1)
+
+
+def dosage_after_brief_keyboard(*, can_ask_ai: bool = False, query: str = "") -> str:
+    kb = VkKeyboard(inline=True)
+    kb.add_callback_button(
+        "Калькулятор дозы",
+        payload={"cmd": "dosage_to_calc"},
+        color=VkKeyboardColor.PRIMARY,
+    )
+    if can_ask_ai:
+        kb.add_line()
+        kb.add_callback_button(
+            "Спросить ИИ",
+            payload={"cmd": "dosage_ask_ai"},
+            color=VkKeyboardColor.SECONDARY,
+        )
+    return keyboard_to_json(kb)
+
+
+def dosage_miss_keyboard(*, can_ask_ai: bool) -> str:
+    kb = VkKeyboard(inline=True)
+    if can_ask_ai:
+        kb.add_callback_button(
+            "Спросить ИИ",
+            payload={"cmd": "dosage_ask_ai"},
+            color=VkKeyboardColor.PRIMARY,
+        )
+    else:
+        kb.add_callback_button(
+            "Подписка Дозировки 200₽",
+            payload={"cmd": "sub_plan", "plan": "dosage"},
+            color=VkKeyboardColor.POSITIVE,
+        )
+    return keyboard_to_json(kb)
+
+
+def dosage_upsell_keyboard() -> str:
+    kb = VkKeyboard(inline=True)
+    kb.add_callback_button(
+        "Дозировки — 200 ₽/мес",
+        payload={"cmd": "sub_plan", "plan": "dosage"},
+        color=VkKeyboardColor.POSITIVE,
+    )
+    return keyboard_to_json(kb)
+
+
+def calculator_upsell_keyboard() -> str:
+    kb = VkKeyboard(inline=True)
+    kb.add_callback_button(
+        "Калькулятор — 300 ₽/мес",
+        payload={"cmd": "sub_plan", "plan": "calculator"},
+        color=VkKeyboardColor.POSITIVE,
+    )
+    return keyboard_to_json(kb)
+
+
+def calc_confirm_keyboard() -> str:
+    return yes_no_keyboard("calc_confirm")
+

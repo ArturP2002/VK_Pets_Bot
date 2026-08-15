@@ -14,15 +14,25 @@ logger = logging.getLogger(__name__)
 MAX_CHARGE_RETRIES = 2
 
 
-def get_active_agreement(user: User) -> RecurrentAgreement | None:
-    return (
+def get_active_agreement(
+    user: User, plan: str | None = None
+) -> RecurrentAgreement | None:
+    query = RecurrentAgreement.select().where(
+        (RecurrentAgreement.user == user) & (RecurrentAgreement.status == "active")
+    )
+    if plan:
+        query = query.where(RecurrentAgreement.plan == plan)
+    return query.order_by(RecurrentAgreement.agreed_at.desc()).first()
+
+
+def list_active_agreements(user: User) -> list[RecurrentAgreement]:
+    return list(
         RecurrentAgreement.select()
         .where(
             (RecurrentAgreement.user == user)
             & (RecurrentAgreement.status == "active")
         )
         .order_by(RecurrentAgreement.agreed_at.desc())
-        .first()
     )
 
 
@@ -50,7 +60,8 @@ def create_agreement_from_payment(
     if payment.tariff == "one_time":
         return None
     user = payment.user
-    existing = get_active_agreement(user)
+    # One active agreement per plan — buying dosage must not cancel starter renewals.
+    existing = get_active_agreement(user, plan=payment.tariff)
     if existing:
         existing.status = "expired"
         existing.save()
@@ -96,34 +107,46 @@ def create_mock_agreement(payment: Payment) -> RecurrentAgreement | None:
 
 
 def cancel_agreement(user: User) -> RecurrentAgreement | None:
-    agreement = get_active_agreement(user)
-    if not agreement:
+    """Cancel all active auto-renew agreements for the user. Returns the first cancelled."""
+    agreements = list_active_agreements(user)
+    if not agreements:
         return None
-    agreement.status = "cancelled"
-    agreement.cancelled_at = datetime.utcnow()
-    agreement.save()
-    for sub in Subscription.select().where(
-        (Subscription.user == user)
-        & (Subscription.status == "active")
-        & (Subscription.recurrent_agreement == agreement)
-    ):
-        sub.auto_renew = False
-        sub.save()
-    log_action(user.vk_id, "recurrent_agreement_cancelled", "recurrent_agreement", agreement.id)
-    return agreement
+    now = datetime.utcnow()
+    first = None
+    for agreement in agreements:
+        agreement.status = "cancelled"
+        agreement.cancelled_at = now
+        agreement.save()
+        for sub in Subscription.select().where(
+            (Subscription.user == user)
+            & (Subscription.status == "active")
+            & (Subscription.recurrent_agreement == agreement)
+        ):
+            sub.auto_renew = False
+            sub.save()
+        log_action(user.vk_id, "recurrent_agreement_cancelled", "recurrent_agreement", agreement.id)
+        if first is None:
+            first = agreement
+    return first
 
 
 def _extend_subscription(agreement: RecurrentAgreement, payment: Payment):
     user = agreement.user
     months = agreement.period_months
-    sub = subscription_service.get_active_subscription(user)
     now = datetime.utcnow()
-    if sub and sub.ends_at > now and not sub.is_trial:
+    if agreement.plan in subscription_service.ADDON_PLANS:
+        sub = subscription_service.get_active_plan_subscription(user, agreement.plan)
+    else:
+        sub = subscription_service.get_active_subscription(user)
+        if sub and sub.is_trial:
+            sub = None
+    if sub and sub.ends_at > now:
         ends = sub.ends_at + timedelta(days=30 * months)
         sub.status = "expired"
         sub.save()
     else:
         ends = now + timedelta(days=30 * months)
+        sub = None
     new_sub = Subscription.create(
         user=user,
         plan=agreement.plan,

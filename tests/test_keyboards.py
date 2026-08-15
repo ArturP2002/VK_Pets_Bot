@@ -32,3 +32,38 @@ def test_one_time_button_label():
     from services.subscription_catalog import one_time_button_label
 
     assert one_time_button_label() == "Разовая консультация"
+
+
+def test_main_menu_has_dosage_and_calculator():
+    from bot.keyboards import main_menu_keyboard
+
+    kb = main_menu_keyboard()
+    assert "Дозировки препаратов" in kb
+    assert "Калькулятор дозы" in kb
+
+
+def test_dosage_upsell_keyboard():
+    from bot.keyboards import dosage_upsell_keyboard
+
+    kb = dosage_upsell_keyboard()
+    assert "dosage" in kb
+    assert "sub_plan" in kb
+
+
+def test_subscription_plans_keyboard_includes_addons():
+    from bot.keyboards import subscription_plans_keyboard
+
+    kb = subscription_plans_keyboard()
+    # Payload is JSON-encoded inside the keyboard JSON (escaped quotes).
+    assert "dosage" in kb
+    assert "calculator" in kb
+    assert "200" in kb
+    assert "300" in kb
+
+
+def test_calculator_upsell_keyboard():
+    from bot.keyboards import calculator_upsell_keyboard
+
+    kb = calculator_upsell_keyboard()
+    assert "calculator" in kb
+    assert "300" in kb

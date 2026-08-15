@@ -1,5 +1,5 @@
 import config
-from bot.handlers import common, pets, subscription, tickets
+from bot.handlers import calculator, common, dosage, pets, subscription, tickets
 from bot.keyboards import back_menu_keyboard
 from integrations import vk
 from services import payment_service, subscription_catalog, user_service
@@ -77,6 +77,10 @@ def handle_menu_text(peer_id: int, vk_user_id: int, text: str):
         show_clinics(peer_id)
     elif text == "Пробный период 5 дней":
         subscription.start_trial_flow(peer_id, user)
+    elif text == dosage.MENU_LABEL:
+        dosage.start_dosage(peer_id, vk_user_id)
+    elif text == calculator.MENU_LABEL:
+        calculator.start_calculator(peer_id, vk_user_id)
     elif text == subscription_catalog.one_time_button_label():
         subscription.begin_one_time_consultation_flow(peer_id, vk_user_id)
     else:

@@ -7,7 +7,7 @@ from services import bot_docs, recurrent_billing_service, session, subscription_
 from services.audit import log_action
 from services.subscription_catalog import (
     format_activation_success,
-    format_active_subscription,
+    format_active_subscriptions,
     format_cancel_auto_renew_confirm,
     format_cancel_auto_renew_success,
     format_checkout_consent,
@@ -20,15 +20,15 @@ from services.subscription_catalog import (
 
 
 def show_subscription(peer_id: int, user):
-    sub = subscription_service.get_active_subscription(user)
+    subs = subscription_service.list_active_subscriptions(user)
     parts = []
-    if sub:
-        parts.append(format_active_subscription(sub))
+    if subs:
+        parts.append(format_active_subscriptions(subs))
     else:
         parts.append(format_no_subscription())
     parts.append(format_payment_history(payment_service.list_user_payments(user)))
     parts.append(format_subscription_history(user))
-    show_cancel = bool(sub and sub.auto_renew and not sub.is_trial)
+    show_cancel = any(s.auto_renew and not s.is_trial for s in subs)
     vk.send_message(
         peer_id,
         "\n\n".join(parts),
@@ -58,7 +58,8 @@ def start_trial_flow(peer_id: int, user):
             (
                 f"✅ Пробный период {config.TRIAL_DAYS} дней активирован.\n\n"
                 f"Действует до: {sub.ends_at.strftime('%d.%m.%Y')}\n"
-                "Доступны возможности тарифа «Стартовый»."
+                "Доступны возможности тарифа «Стартовый», а также модули "
+                "«Дозировки препаратов» и «Калькулятор дозы»."
             ),
             back_menu_keyboard(),
         )
@@ -167,7 +168,12 @@ def handle_pay_ok(peer_id: int, vk_user_id: int, order_id: str):
         if payment.tariff != "one_time":
             if config.PAYMENT_PROVIDER == "mock":
                 recurrent_billing_service.create_mock_agreement(payment)
-            sub = subscription_service.get_active_subscription(user)
+            if payment.tariff in subscription_service.ADDON_PLANS:
+                sub = subscription_service.get_active_plan_subscription(
+                    user, payment.tariff
+                )
+            else:
+                sub = subscription_service.get_active_subscription(user)
             chat_service.sync_chats_for_user(user)
             notification_service.queue_notification(
                 user.vk_id,

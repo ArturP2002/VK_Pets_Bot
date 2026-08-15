@@ -1,7 +1,18 @@
 import json
 import logging
 
-from bot.handlers import common, doctor, legal, menu, pets, registration, subscription, tickets
+from bot.handlers import (
+    calculator,
+    common,
+    doctor,
+    dosage,
+    legal,
+    menu,
+    pets,
+    registration,
+    subscription,
+    tickets,
+)
 from services import session
 
 logger = logging.getLogger(__name__)
@@ -41,6 +52,10 @@ def route_message(peer_id: int, vk_user_id: int, text: str, attachments: list[st
     if pets.handle_pet_message(peer_id, vk_user_id, text):
         return
     if tickets.handle_ticket_message(peer_id, vk_user_id, text):
+        return
+    if dosage.handle_dosage_message(peer_id, vk_user_id, text):
+        return
+    if calculator.handle_calculator_message(peer_id, vk_user_id, text):
         return
     menu.handle_menu_text(peer_id, vk_user_id, text)
 
@@ -95,4 +110,13 @@ def route_event(peer_id: int, vk_user_id: int, payload_raw, event: dict | None =
         return doctor.handle_assign_callback(peer_id, vk_user_id, int(payload.get("number", 0)))
     elif cmd == "doc_complete":
         return doctor.handle_complete_callback(peer_id, vk_user_id, int(payload.get("number", 0)))
+    elif cmd == "dosage_pick":
+        return dosage.pick_drug(peer_id, vk_user_id, int(payload.get("drug_id", 0)))
+    elif cmd == "dosage_ask_ai":
+        return dosage.start_ask_ai(peer_id, vk_user_id)
+    elif cmd == "dosage_to_calc":
+        calculator.start_calculator(peer_id, vk_user_id)
+        return "Калькулятор"
+    elif cmd == "calc_confirm":
+        return calculator.confirm_calc(peer_id, vk_user_id, payload.get("answer", "no"))
     return None

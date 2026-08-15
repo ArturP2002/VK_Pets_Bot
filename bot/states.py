@@ -36,3 +36,12 @@ SUB_CHOOSE_PERIOD = "sub_choose_period"
 SUB_CHECKOUT_CONSENT = "sub_checkout_consent"
 PAYMENT_PENDING = "payment_pending"
 CANCEL_AUTO_RENEW = "cancel_auto_renew"
+
+DOSAGE_WAIT_QUERY = "dosage_wait_query"
+DOSAGE_PICK = "dosage_pick"
+DOSAGE_QA = "dosage_qa"
+DOSAGE_ASK_AI = "dosage_ask_ai"
+
+CALC_WAIT_TEXT = "calc_wait_text"
+CALC_CONFIRM = "calc_confirm"
+CALC_MISSING = "calc_missing"

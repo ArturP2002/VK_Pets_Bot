@@ -50,7 +50,12 @@ def _notify_payment_success(payment):
     else:
         from services import subscription_service
 
-        sub = subscription_service.get_active_subscription(user)
+        if payment.tariff in subscription_service.ADDON_PLANS:
+            sub = subscription_service.get_active_plan_subscription(
+                user, payment.tariff
+            )
+        else:
+            sub = subscription_service.get_active_subscription(user)
         chat_service.sync_chats_for_user(user)
         notification_service.queue_notification(
             user.vk_id,

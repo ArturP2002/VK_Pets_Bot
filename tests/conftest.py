@@ -13,3 +13,9 @@ def memory_db():
     yield test_db
     test_db.drop_tables(ALL_MODELS)
     test_db.close()
+
+
+@pytest.fixture(autouse=True)
+def mock_payment_provider(monkeypatch):
+    """Never hit real T-Bank from unit tests (even if .env has PAYMENT_PROVIDER=tbank)."""
+    monkeypatch.setattr("config.PAYMENT_PROVIDER", "mock")

@@ -5,6 +5,7 @@ import config
 from models import Payment, RecurrentAgreement, Subscription, User
 
 PLAN_ORDER = ("starter", "basic", "premium")
+ADDON_PLAN_ORDER = ("dosage", "calculator")
 
 PLANS: dict[str, dict] = {
     "starter": {
@@ -40,6 +41,27 @@ PLANS: dict[str, dict] = {
             "хранение истории болезни животного",
             "возможность вызова врача в клинику (по согласованию с врачом)",
             "Скидка 10% в партнёрских клиниках (тестовый режим)",
+        ],
+    },
+    "dosage": {
+        "name": "Дозировки",
+        "tagline": "Справочник препаратов без лимита",
+        "features": [
+            "Неограниченный поиск дозировок препаратов",
+            "Без задержки выдачи ответа",
+            "Уточняющие вопросы по карточке препарата",
+            "Кнопка «Спросить ИИ» при отсутствии в базе",
+            "Не включает калькулятор дозы и консультации врача",
+        ],
+    },
+    "calculator": {
+        "name": "Калькулятор дозы",
+        "tagline": "Расчёт дозы по весу и форме выпуска",
+        "features": [
+            "Свободный текст → расчёт таблеток/мл",
+            "Подстановка мг/кг из справочника при необходимости",
+            "Проверка min–max по справочнику",
+            "Не включает модуль дозировок и консультации врача",
         ],
     },
 }
@@ -128,6 +150,13 @@ def format_catalog_overview() -> str:
         lines.append("")
     lines.append(f"▸ {ONE_TIME_PLAN['name']} — {config.ONE_TIME_CONSULTATION_PRICE} ₽")
     lines.append(f"  {ONE_TIME_PLAN['tagline']}")
+    lines.append("")
+    lines.append("Дополнительно (отдельно от консультаций):")
+    for plan_id in ADDON_PLAN_ORDER:
+        plan = PLANS[plan_id]
+        price = min_monthly_price(plan_id)
+        lines.append(f"▸ {plan['name']} — {price} ₽/мес")
+        lines.append(f"  {plan['tagline']}")
     return "\n".join(lines)
 
 
@@ -212,6 +241,35 @@ def format_active_subscription(sub: Subscription) -> str:
     return "\n".join(lines)
 
 
+def format_active_subscriptions(subs: list[Subscription]) -> str:
+    """Render one or more concurrent subscriptions (consultation + addons)."""
+    if not subs:
+        return format_no_subscription()
+    if len(subs) == 1:
+        return format_active_subscription(subs[0])
+
+    blocks: list[str] = ["✅ Активные подписки", ""]
+    for i, sub in enumerate(subs):
+        if sub.is_trial:
+            title = f"Пробный период ({PLANS['starter']['name']})"
+        else:
+            title = plan_name(sub.plan)
+        renew = ""
+        if not sub.is_trial:
+            renew = " · автопродление" if sub.auto_renew else " · без автопродления"
+        blocks.append(
+            f"▸ {title}: до {sub.ends_at.strftime('%d.%m.%Y')} [{sub.status}]{renew}"
+        )
+        plan = PLANS.get("starter" if sub.is_trial else sub.plan)
+        if plan:
+            for feature in plan["features"][:2]:
+                blocks.append(f"  • {feature}")
+        if i + 1 < len(subs):
+            blocks.append("")
+    blocks.extend(["", "Ниже можно оформить другой тариф или продлить подписку."])
+    return "\n".join(blocks)
+
+
 def format_no_subscription() -> str:
     return (
         "У вас нет активной подписки.\n"
@@ -273,7 +331,10 @@ def format_activation_success(sub: Subscription | None, payment: Payment) -> str
     if plan.get("features"):
         lines.extend(["", "Теперь доступно:"])
         lines.extend(f"• {f}" for f in plan["features"])
-    lines.append("\nМожете создавать заявки через главное меню.")
+    if plan_id in ("dosage", "calculator"):
+        lines.append("\nМодуль доступен из главного меню.")
+    else:
+        lines.append("\nМожете создавать заявки через главное меню.")
     return "\n".join(lines)
 
 

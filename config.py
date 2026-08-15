@@ -13,6 +13,26 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DB_PATH = os.getenv("DB_PATH", str(DATA_DIR / "VK_Pets_DB.db"))
 
+# Formulary / dosage modules (separate DB from tickets)
+FORMULARY_DB = os.getenv("FORMULARY_DB", str(DATA_DIR / "formulary.db"))
+FORMULARY_CHROMA_DIR = os.getenv(
+    "FORMULARY_CHROMA_DIR", str(DATA_DIR / "chroma_formulary")
+)
+FORMULARY_CHROMA_COLLECTION = os.getenv(
+    "FORMULARY_CHROMA_COLLECTION", "formulary_chunks"
+)
+FORMULARY_EMBEDDING_MODEL = os.getenv(
+    "FORMULARY_EMBEDDING_MODEL", "paraphrase-multilingual-MiniLM-L12-v2"
+)
+FORMULARY_SEARCH_MIN_SCORE = float(os.getenv("FORMULARY_SEARCH_MIN_SCORE", "70"))
+FORMULARY_RAG_TOP_K = int(os.getenv("FORMULARY_RAG_TOP_K", "6") or 6)
+FORMULARY_DOSAGE_DELAY_SEC = int(os.getenv("FORMULARY_DOSAGE_DELAY_SEC", "30") or 30)
+FORMULARY_FREE_LIMIT_PER_24H = int(os.getenv("FORMULARY_FREE_LIMIT_PER_24H", "2") or 2)
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
+CLAUDE_MAX_TOKENS = int(os.getenv("CLAUDE_MAX_TOKENS", "2048") or 2048)
+
 VK_GROUP_TOKEN = os.getenv("VK_GROUP_TOKEN", "")
 VK_GROUP_ID = int(os.getenv("VK_GROUP_ID", "0") or 0)
 VK_DOCTOR_CHAT_ID = int(os.getenv("VK_DOCTOR_CHAT_ID", "0") or 0)
@@ -152,6 +172,9 @@ TARIFF_PRICES = {
     "starter": {1: 999, 3: 2699, 6: 5399},
     "basic": {1: 2999, 3: 8099, 6: 16199},
     "premium": {1: 6999, 3: 18899, 6: 37799},
+    # Separate SKUs — do not unlock via starter/basic/premium
+    "dosage": {1: int(os.getenv("DOSAGE_PLAN_PRICE", "200") or 200)},
+    "calculator": {1: int(os.getenv("CALCULATOR_PLAN_PRICE", "300") or 300)},
 }
 ONE_TIME_CONSULTATION_PRICE = 2500
 ONE_TIME_BUTTON_LABEL = os.getenv("ONE_TIME_BUTTON_LABEL", "Разовая консультация")
