@@ -57,12 +57,12 @@ def handle_dosage_message(peer_id: int, vk_user_id: int, text: str) -> bool:
     if not text:
         return True
 
-    normalized = text.lower()
-    if normalized in ("меню", "главное меню", "отмена", "cancel", "начать", "start", "/start"):
-        session.clear_state(vk_user_id)
+    # «Главное меню» / «Начать» обрабатываются в router; здесь — отмена сценария
+    low = text.lower().strip()
+    if low in ("отмена", "cancel"):
         from bot.handlers import common
 
-        common.handle_start(peer_id, vk_user_id)
+        common.go_main_menu(peer_id, vk_user_id)
         return True
 
     user = user_service.get_or_create_user(vk_user_id)

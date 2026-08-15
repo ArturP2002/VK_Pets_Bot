@@ -43,6 +43,15 @@ def route_message(peer_id: int, vk_user_id: int, text: str, attachments: list[st
     # Кнопка «Начать» в VK иногда приходит с пустым текстом и payload command=start
     if not text and payload.get("command") in ("start", "Начать"):
         text = "Начать"
+
+    # Global navigation — before any FSM (tickets/pets/dosage/…), so «Главное меню» always works
+    if common.is_start_command(text):
+        common.handle_start(peer_id, vk_user_id)
+        return
+    if common.is_main_menu_command(text):
+        common.go_main_menu(peer_id, vk_user_id)
+        return
+
     if attachments and tickets.handle_ticket_attachments(peer_id, vk_user_id, attachments):
         return
     if doctor.handle_doctor_command(peer_id, vk_user_id, text):

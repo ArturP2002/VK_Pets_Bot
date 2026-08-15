@@ -28,14 +28,13 @@ def _can_create_tickets(user) -> bool:
 
 def handle_menu_text(peer_id: int, vk_user_id: int, text: str):
     text = (text or "").strip()
-    normalized = text.lower()
     user = user_service.get_or_create_user(vk_user_id)
-    if normalized in ("начать", "start", "/start"):
+    # start / главное меню обрабатываются в router до FSM; здесь — запасной путь
+    if common.is_start_command(text):
         common.handle_start(peer_id, vk_user_id)
         return
-    if normalized in ("меню", "главное меню"):
-        if require_gate(peer_id, user):
-            common.send_main_menu(peer_id, user)
+    if common.is_main_menu_command(text):
+        common.go_main_menu(peer_id, vk_user_id)
         return
     if not require_gate(peer_id, user):
         return
