@@ -173,9 +173,16 @@ def ask_ai_fallback(question: str) -> str:
 
 def calc_extract(free_text: str) -> dict[str, Any]:
     system = _load_prompt("calc_extract") or (
-        "Извлеки параметры расчёта дозы в JSON со полями: "
-        "drug, species, weight_kg, dose_mg_per_kg, form, mg_per_unit, "
-        "concentration_mg_ml, route, notes, missing_fields (массив). "
-        "Не выдумывай число мг/кг — если его нет во входе, поставь null."
+        "Извлеки параметры расчёта дозы из свободного русского текста в JSON: "
+        "drug, species, weight_kg, dose_mg_per_kg, form (tablet|solution|other), "
+        "mg_per_unit, concentration_mg_ml, route, notes, missing_fields. "
+        "Не выдумывай числа. Понимай естественную речь без шаблонов."
     )
-    return chat_json(system=system, user=free_text)
+    user = (
+        "Разбери свободный текст пользователя (без шаблона) и верни JSON.\n\n"
+        f"Текст:\n{free_text}"
+    )
+    data = chat_json(system=system, user=user)
+    if not isinstance(data, dict):
+        raise LLMError("calc_extract: expected object")
+    return data

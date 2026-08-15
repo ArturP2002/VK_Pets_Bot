@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from bot import keyboards, states
@@ -20,14 +21,27 @@ logger = logging.getLogger(__name__)
 
 MENU_LABEL = "Калькулятор дозы (для владельцев)"
 
+FIELD_LABELS = {
+    "weight_kg": "вес животного в килограммах",
+    "dose_mg_per_kg": "дозу в мг/кг (как назначил врач)",
+    "mg_per_unit": "сколько мг действующего вещества в одной таблетке",
+    "concentration_mg_ml": "концентрацию раствора в мг/мл",
+    "form": "форму выпуска: таблетки или раствор",
+    "drug": "название препарата",
+    "species": "вид животного",
+}
+
 FIELD_PROMPTS = {
-    "weight_kg": "Укажите вес животного в кг (число).",
-    "dose_mg_per_kg": "Укажите дозу в мг/кг (число), либо название препарата и вид — подставим из справочника.",
-    "mg_per_unit": "Укажите содержание действующего вещества в 1 таблетке (мг).",
-    "concentration_mg_ml": "Укажите концентрацию раствора (мг/мл).",
-    "form": "Укажите форму: таблетка или раствор.",
-    "drug": "Укажите название препарата.",
-    "species": "Укажите вид животного.",
+    "weight_kg": "Напишите вес животного в кг — например: 4 или 1.2 кг.",
+    "dose_mg_per_kg": (
+        "Напишите дозу в мг/кг, которую назначил врач — например: 12 мг/кг.\n"
+        "Если дозы нет, укажите препарат и вид — попробуем взять из справочника."
+    ),
+    "mg_per_unit": "Сколько мг в одной таблетке? Например: 50 мг.",
+    "concentration_mg_ml": "Какая концентрация раствора (мг/мл)? Например: 5 мг/мл.",
+    "form": "Это таблетки или раствор?",
+    "drug": "Как называется препарат?",
+    "species": "Какой вид животного? (кот, собака, кролик…)",
 }
 
 
@@ -50,11 +64,10 @@ def start_calculator(peer_id: int, vk_user_id: int):
     vk.send_message(
         peer_id,
         "🧮 Калькулятор дозы (для владельцев)\n\n"
-        "Опишите свободным текстом, например:\n"
-        "«Мелоксикам, кролик 1.2 кг, 0.2 мг/кг, таблетки по 1 мг»\n"
-        "или «раствор 5 мг/мл, птица 0.08 кг, 10 мг/кг».\n\n"
-        "ИИ извлечёт параметры, арифметику посчитает код "
-        "(с округлением таблеток до ¼ и проверкой min–max).",
+        "Напишите как удобно, своими словами — без шаблонов.\n"
+        "Например: «У кота 4 кг, амоксициллин 12 мг/кг, таблетки по 50 мг — сколько давать?»\n\n"
+        "Если чего-то не хватит для расчёта, спросим отдельно.\n"
+        "Считает код (округление таблеток до ¼, проверка min–max по справочнику).",
         back_menu_keyboard(),
     )
 
@@ -98,7 +111,6 @@ def handle_calculator_message(peer_id: int, vk_user_id: int, text: str) -> bool:
         return True
 
     if state == states.CALC_CONFIRM:
-        # Typed yes/no
         if normalized in ("да", "yes", "ок", "ok", "посчитать", "рассчитать"):
             confirm_calc(peer_id, vk_user_id, "yes")
         elif normalized in ("нет", "no", "отмена"):
@@ -116,34 +128,19 @@ def handle_calculator_message(peer_id: int, vk_user_id: int, text: str) -> bool:
 
 def _extract_and_continue(peer_id: int, user, text: str):
     vk.send_message(peer_id, "Разбираю параметры…")
-    try:
-        if not llm_client.is_configured():
-            extract = _naive_extract(text)
-        else:
-            extract = llm_client.calc_extract(text)
-    except llm_client.LLMError as exc:
-        logger.warning("calc_extract failed: %s", exc)
-        vk.send_message(
-            peer_id,
-            "Не удалось разобрать текст. Попробуйте ещё раз проще "
-            "(препарат, вид, вес кг, мг/кг, форма).",
-            back_menu_keyboard(),
-        )
-        return
-
+    extract = _extract_params(text)
     extract = _enrich_from_formulary(extract)
     missing = _required_missing(extract)
     session.set_state(
         user.vk_id,
         states.CALC_MISSING if missing else states.CALC_CONFIRM,
-        {"extract": extract, "missing": missing, "missing_idx": 0},
+        {"extract": extract, "missing": missing, "missing_idx": 0, "raw_text": text},
     )
 
     if missing:
-        field = missing[0]
         vk.send_message(
             peer_id,
-            f"Не хватает данных.\n\n{FIELD_PROMPTS.get(field, field)}",
+            _missing_message(extract, missing),
             back_menu_keyboard(),
         )
         return
@@ -151,20 +148,148 @@ def _extract_and_continue(peer_id: int, user, text: str):
     _show_confirm(peer_id, user.vk_id, extract)
 
 
+def _extract_params(text: str) -> dict[str, Any]:
+    """LLM extract with heuristic merge; never hard-fail on free-form text."""
+    naive = _normalize_extract(_naive_extract(text))
+    if not llm_client.is_configured():
+        return naive
+
+    try:
+        llm_data = _normalize_extract(llm_client.calc_extract(text))
+    except llm_client.LLMError as exc:
+        logger.warning("calc_extract failed, using heuristic fallback: %s", exc)
+        return naive
+
+    return _merge_extracts(llm_data, naive)
+
+
+def _merge_extracts(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    """Prefer LLM values; fill gaps from heuristics."""
+    out = dict(fallback)
+    for key, value in primary.items():
+        if key.startswith("_"):
+            out[key] = value
+            continue
+        if value is None or value == "" or value == []:
+            continue
+        out[key] = value
+    # Prefer explicit numeric from either side
+    for key in ("weight_kg", "dose_mg_per_kg", "mg_per_unit", "concentration_mg_ml"):
+        if _as_float(out.get(key)) is None and _as_float(fallback.get(key)) is not None:
+            out[key] = fallback[key]
+        elif _as_float(primary.get(key)) is not None:
+            out[key] = primary[key]
+    return _normalize_extract(out)
+
+
+def _normalize_extract(data: dict[str, Any]) -> dict[str, Any]:
+    out = {
+        "drug": (data.get("drug") or None),
+        "species": (data.get("species") or None),
+        "weight_kg": _as_float(data.get("weight_kg")),
+        "dose_mg_per_kg": _as_float(data.get("dose_mg_per_kg")),
+        "form": data.get("form"),
+        "mg_per_unit": _as_float(data.get("mg_per_unit")),
+        "concentration_mg_ml": _as_float(data.get("concentration_mg_ml")),
+        "route": data.get("route"),
+        "notes": data.get("notes"),
+        "missing_fields": list(data.get("missing_fields") or []),
+    }
+    if isinstance(out["drug"], str):
+        out["drug"] = out["drug"].strip() or None
+    if isinstance(out["species"], str):
+        out["species"] = out["species"].strip() or None
+
+    form = _normalize_form(out.get("form"))
+    if form is None:
+        if out["mg_per_unit"] is not None:
+            form = "tablet"
+        elif out["concentration_mg_ml"] is not None:
+            form = "solution"
+    out["form"] = form
+
+    # Keep helpful extras from formulary enrichment
+    for key, value in data.items():
+        if key.startswith("_"):
+            out[key] = value
+    return out
+
+
+def _normalize_form(form: Any) -> str | None:
+    if form is None:
+        return None
+    low = str(form).strip().lower()
+    if not low:
+        return None
+    if any(x in low for x in ("tablet", "таблет", "табл", "tab")):
+        return "tablet"
+    if any(x in low for x in ("solution", "раствор", "инъек", "injection", "liquid", "сироп")):
+        return "solution"
+    if low in ("other", "другое"):
+        return "other"
+    return low
+
+
+def _missing_message(extract: dict, missing: list[str]) -> str:
+    found: list[str] = []
+    if extract.get("drug"):
+        found.append(f"препарат — {extract['drug']}")
+    if extract.get("species"):
+        found.append(f"вид — {extract['species']}")
+    if extract.get("weight_kg") is not None:
+        found.append(f"вес — {extract['weight_kg']:g} кг")
+    if extract.get("dose_mg_per_kg") is not None:
+        found.append(f"доза — {extract['dose_mg_per_kg']:g} мг/кг")
+    if extract.get("form") == "tablet" and extract.get("mg_per_unit") is not None:
+        found.append(f"таблетки по {extract['mg_per_unit']:g} мг")
+    if extract.get("form") == "solution" and extract.get("concentration_mg_ml") is not None:
+        found.append(f"раствор {extract['concentration_mg_ml']:g} мг/мл")
+
+    lines = ["Понял часть данных." if found else "Нужно чуть уточнить."]
+    if found:
+        lines.append("Уже есть: " + "; ".join(found) + ".")
+    lines.append("")
+    if len(missing) == 1:
+        lines.append(FIELD_PROMPTS.get(missing[0], f"Укажите: {FIELD_LABELS.get(missing[0], missing[0])}."))
+    else:
+        lines.append("Не хватает для расчёта:")
+        for field in missing:
+            label = FIELD_LABELS.get(field, field)
+            lines.append(f"• {label}")
+        lines.append("")
+        lines.append(FIELD_PROMPTS.get(missing[0], f"Сначала укажите: {FIELD_LABELS.get(missing[0], missing[0])}."))
+    return "\n".join(lines)
+
+
 def _fill_missing(peer_id: int, user, text: str, data: dict):
     extract = dict(data.get("extract") or {})
     missing = list(data.get("missing") or [])
     idx = int(data.get("missing_idx") or 0)
+
+    # If user sent another full free-form sentence — re-extract and merge
+    if _looks_like_full_query(text):
+        fresh = _extract_params(text)
+        extract = _merge_extracts(fresh, extract)
+        extract = _enrich_from_formulary(extract)
+        remaining = _required_missing(extract)
+        if remaining:
+            session.set_state(
+                user.vk_id,
+                states.CALC_MISSING,
+                {"extract": extract, "missing": remaining, "missing_idx": 0},
+            )
+            vk.send_message(peer_id, _missing_message(extract, remaining), back_menu_keyboard())
+            return
+        session.set_state(user.vk_id, states.CALC_CONFIRM, {"extract": extract})
+        _show_confirm(peer_id, user.vk_id, extract)
+        return
+
     if not missing or idx >= len(missing):
         extract = _enrich_from_formulary(extract)
         missing = _required_missing(extract)
         if missing:
             session.update_payload(user.vk_id, extract=extract, missing=missing, missing_idx=0)
-            vk.send_message(
-                peer_id,
-                FIELD_PROMPTS.get(missing[0], missing[0]),
-                back_menu_keyboard(),
-            )
+            vk.send_message(peer_id, _missing_message(extract, missing), back_menu_keyboard())
             return
         session.set_state(user.vk_id, states.CALC_CONFIRM, {"extract": extract})
         _show_confirm(peer_id, user.vk_id, extract)
@@ -173,13 +298,26 @@ def _fill_missing(peer_id: int, user, text: str, data: dict):
     field = missing[idx]
     value = _parse_field(field, text)
     if value is None and field in ("weight_kg", "dose_mg_per_kg", "mg_per_unit", "concentration_mg_ml"):
-        vk.send_message(peer_id, "Нужно число. " + FIELD_PROMPTS.get(field, field))
-        return
+        # Try pulling the number from a short free phrase
+        patched = _normalize_extract(_naive_extract(text))
+        if field == "weight_kg" and patched.get("weight_kg") is not None:
+            value = patched["weight_kg"]
+        elif field == "dose_mg_per_kg" and patched.get("dose_mg_per_kg") is not None:
+            value = patched["dose_mg_per_kg"]
+        elif field == "mg_per_unit" and patched.get("mg_per_unit") is not None:
+            value = patched["mg_per_unit"]
+        elif field == "concentration_mg_ml" and patched.get("concentration_mg_ml") is not None:
+            value = patched["concentration_mg_ml"]
+        else:
+            vk.send_message(peer_id, "Нужно число. " + FIELD_PROMPTS.get(field, field))
+            return
+
     if value is not None:
         extract[field] = value
     elif field in ("drug", "species", "form", "route", "notes"):
         extract[field] = text.strip()
 
+    extract = _normalize_extract(extract)
     extract = _enrich_from_formulary(extract)
     remaining = _required_missing(extract)
     if remaining:
@@ -190,13 +328,21 @@ def _fill_missing(peer_id: int, user, text: str, data: dict):
         )
         vk.send_message(
             peer_id,
-            FIELD_PROMPTS.get(remaining[0], remaining[0]),
+            _missing_message(extract, remaining),
             back_menu_keyboard(),
         )
         return
 
     session.set_state(user.vk_id, states.CALC_CONFIRM, {"extract": extract})
     _show_confirm(peer_id, user.vk_id, extract)
+
+
+def _looks_like_full_query(text: str) -> bool:
+    low = text.lower()
+    has_weight = bool(re.search(r"\d+[.,]?\d*\s*(кг|kg|г\b|g\b)", low))
+    has_dose = bool(re.search(r"мг\s*/\s*кг|mg\s*/\s*kg", low))
+    has_form = bool(re.search(r"таблет|раствор|мг\s*/\s*мл|mg\s*/\s*ml", low))
+    return sum([has_weight, has_dose, has_form]) >= 2 or (has_weight and has_dose)
 
 
 def _show_confirm(peer_id: int, vk_user_id: int, extract: dict):
@@ -207,7 +353,7 @@ def _show_confirm(peer_id: int, vk_user_id: int, extract: dict):
         f"• Вид: {extract.get('species') or '—'}",
         f"• Вес: {extract.get('weight_kg')} кг",
         f"• Доза: {extract.get('dose_mg_per_kg')} мг/кг",
-        f"• Форма: {extract.get('form') or '—'}",
+        f"• Форма: {_form_label(extract.get('form'))}",
     ]
     if extract.get("mg_per_unit"):
         lines.append(f"• мг в таблетке: {extract.get('mg_per_unit')}")
@@ -220,6 +366,15 @@ def _show_confirm(peer_id: int, vk_user_id: int, extract: dict):
     lines.extend(["", "Рассчитать?"])
     session.set_state(vk_user_id, states.CALC_CONFIRM, {"extract": extract})
     vk.send_message(peer_id, "\n".join(lines), keyboards.calc_confirm_keyboard())
+
+
+def _form_label(form: Any) -> str:
+    f = _normalize_form(form)
+    if f == "tablet":
+        return "таблетки"
+    if f == "solution":
+        return "раствор"
+    return form or "—"
 
 
 def confirm_calc(peer_id: int, vk_user_id: int, answer: str) -> str | None:
@@ -250,16 +405,20 @@ def confirm_calc(peer_id: int, vk_user_id: int, answer: str) -> str | None:
 
 def _enrich_from_formulary(extract: dict[str, Any]) -> dict[str, Any]:
     """If dose_mg_per_kg missing — try formulary by drug + species (code, not LLM guess)."""
-    out = dict(extract)
+    out = _normalize_extract(extract)
     dose = _as_float(out.get("dose_mg_per_kg"))
     if dose is not None and dose > 0:
         out["dose_mg_per_kg"] = dose
-        # still attach min/max for warnings if we can find the drug
+
     drug_name = (out.get("drug") or "").strip()
     if not drug_name:
         return out
 
-    hits = formulary_search.search_drugs(drug_name, limit=1)
+    try:
+        hits = formulary_search.search_drugs(drug_name, limit=1)
+    except Exception as exc:
+        logger.warning("formulary lookup failed: %s", exc)
+        return out
     if not hits:
         return out
     drug = formulary_search.get_drug(hits[0].drug_id)
@@ -291,30 +450,34 @@ def _required_missing(extract: dict) -> list[str]:
     if _as_float(extract.get("dose_mg_per_kg")) is None:
         missing.append("dose_mg_per_kg")
 
-    form = (extract.get("form") or "").strip().lower()
-    if form in ("tablet", "таблетка", "таблетки", "tab"):
-        if _as_float(extract.get("mg_per_unit")) is None:
+    form = _normalize_form(extract.get("form"))
+    mg_unit = _as_float(extract.get("mg_per_unit"))
+    conc = _as_float(extract.get("concentration_mg_ml"))
+
+    if form == "tablet" or (form is None and mg_unit is not None):
+        if mg_unit is None:
             missing.append("mg_per_unit")
-    elif form in ("solution", "раствор", "injection", "инъекция", "ml", "liquid"):
-        if _as_float(extract.get("concentration_mg_ml")) is None:
+    elif form == "solution" or (form is None and conc is not None):
+        if conc is None:
             missing.append("concentration_mg_ml")
+    elif form is None and mg_unit is None and conc is None:
+        # Can still compute total mg, but ask form for a useful owner answer
+        missing.append("form")
     return missing
 
 
 def _parse_field(field: str, text: str) -> Any:
     text = text.strip().replace(",", ".")
     if field in ("weight_kg", "dose_mg_per_kg", "mg_per_unit", "concentration_mg_ml"):
+        m = re.search(r"(\d+(?:\.\d+)?)", text)
+        if not m:
+            return None
         try:
-            return float(text.split()[0])
-        except (ValueError, IndexError):
+            return float(m.group(1))
+        except ValueError:
             return None
     if field == "form":
-        low = text.lower()
-        if any(x in low for x in ("таблет", "tab", "табл")):
-            return "tablet"
-        if any(x in low for x in ("раствор", "solution", "мл", "инъек", "liquid")):
-            return "solution"
-        return text
+        return _normalize_form(text)
     return text
 
 
@@ -328,48 +491,126 @@ def _as_float(value: Any) -> float | None:
 
 
 def _naive_extract(text: str) -> dict[str, Any]:
-    """Minimal fallback when Anthropic is not configured — parse obvious numbers."""
-    import re
+    """Heuristic parse of free-form RU text (works even without LLM)."""
+    raw = text
+    low = text.lower().replace("ё", "е")
 
     weight = None
+    m = re.search(r"(\d+[.,]?\d*)\s*(кг|kg)\b", low, re.I)
+    if m:
+        weight = float(m.group(1).replace(",", "."))
+    else:
+        m = re.search(r"(\d+[.,]?\d*)\s*(г|g)\b", low, re.I)
+        if m:
+            weight = float(m.group(1).replace(",", ".")) / 1000.0
+
     dose = None
+    m = re.search(r"(\d+[.,]?\d*)\s*мг\s*/\s*кг", low, re.I)
+    if m:
+        dose = float(m.group(1).replace(",", "."))
+    else:
+        m = re.search(r"(\d+[.,]?\d*)\s*mg\s*/\s*kg", low, re.I)
+        if m:
+            dose = float(m.group(1).replace(",", "."))
+
     mg_unit = None
     conc = None
     form = None
 
-    m = re.search(r"(\d+[.,]?\d*)\s*кг", text, re.I)
-    if m:
-        weight = float(m.group(1).replace(",", "."))
-    m = re.search(r"(\d+[.,]?\d*)\s*мг\s*/\s*кг", text, re.I)
-    if m:
-        dose = float(m.group(1).replace(",", "."))
-    m = re.search(r"таблет\w*\s*по\s*(\d+[.,]?\d*)\s*мг", text, re.I)
+    m = re.search(
+        r"(?:таблет\w*|табл\.?|tab\w*)\s*(?:по\s*)?(\d+[.,]?\d*)\s*мг",
+        low,
+        re.I,
+    )
     if m:
         mg_unit = float(m.group(1).replace(",", "."))
         form = "tablet"
-    m = re.search(r"(\d+[.,]?\d*)\s*мг\s*/\s*мл", text, re.I)
+    if mg_unit is None:
+        m = re.search(r"(\d+[.,]?\d*)\s*мг\s*(?:в\s*)?(?:1\s*)?таблет", low, re.I)
+        if m:
+            mg_unit = float(m.group(1).replace(",", "."))
+            form = "tablet"
+
+    m = re.search(r"(\d+[.,]?\d*)\s*мг\s*/\s*мл", low, re.I)
     if m:
         conc = float(m.group(1).replace(",", "."))
         form = form or "solution"
-    if re.search(r"таблет", text, re.I):
+    if re.search(r"таблет|табл\.?", low, re.I):
         form = form or "tablet"
-    if re.search(r"раствор", text, re.I):
+    if re.search(r"раствор|сироп|суспенз", low, re.I):
         form = form or "solution"
 
-    missing = []
-    if weight is None:
-        missing.append("weight_kg")
-    if dose is None:
-        missing.append("dose_mg_per_kg")
+    species = None
+    for word in (
+        "котёнок",
+        "котенок",
+        "кошка",
+        "кот",
+        "собака",
+        "щенок",
+        "кролик",
+        "хорек",
+        "хорь",
+        "попугай",
+        "птица",
+        "крыса",
+        "мышь",
+        "шиншилла",
+        "черепаха",
+        "ящерица",
+        "змея",
+    ):
+        if re.search(rf"\b{re.escape(word)}\w*\b", low):
+            species = word
+            break
+
+    drug = None
+    # Common drugs + latin-looking tokens after «назначил»
+    m = re.search(
+        r"(?:назначил[аи]?|препарат|дай(?:те)?|дать)\s+([A-Za-zА-Яа-яЁё-]{4,})",
+        raw,
+        re.I,
+    )
+    if m:
+        candidate = m.group(1).strip(".,;:!")
+        if candidate.lower() not in {"врач", "животн", "таблет", "раствор"}:
+            drug = candidate
+    if drug is None:
+        known = (
+            "амоксициллин",
+            "амоксиклав",
+            "мелоксикам",
+            "метронидазол",
+            "энрофлоксацин",
+            "байтрил",
+            "синулокс",
+            "бускопан",
+            "фенбендазол",
+            "фебтал",
+            "преднизолон",
+            "дексаметазон",
+            "трамадол",
+            "габапентин",
+            "маропитант",
+            "серения",
+            "омепразол",
+            "ранитидин",
+            "ивермектин",
+        )
+        for name in known:
+            if name in low:
+                drug = name
+                break
+
     return {
-        "drug": None,
-        "species": None,
+        "drug": drug,
+        "species": species,
         "weight_kg": weight,
         "dose_mg_per_kg": dose,
         "form": form,
         "mg_per_unit": mg_unit,
         "concentration_mg_ml": conc,
         "route": None,
-        "notes": text,
-        "missing_fields": missing,
+        "notes": None,
+        "missing_fields": [],
     }
