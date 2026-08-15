@@ -29,14 +29,34 @@ def is_configured() -> bool:
     return bool(config.ANTHROPIC_API_KEY)
 
 
+_client_singleton = None
+
+
 def _client():
+    """Anthropic client; optional ANTHROPIC_PROXY / HTTPS_PROXY for geo egress."""
+    global _client_singleton
+    if _client_singleton is not None:
+        return _client_singleton
     if not config.ANTHROPIC_API_KEY:
         raise LLMError("ANTHROPIC_API_KEY is not set")
     try:
         import anthropic
+        import httpx
     except ImportError as exc:
         raise LLMError("anthropic package is not installed") from exc
-    return anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+
+    kwargs: dict[str, Any] = {"api_key": config.ANTHROPIC_API_KEY}
+    proxy = (getattr(config, "ANTHROPIC_PROXY", None) or "").strip()
+    if proxy:
+        # httpx 0.28+: proxy= ; older: proxies=
+        try:
+            http_client = httpx.Client(proxy=proxy, timeout=60.0)
+        except TypeError:
+            http_client = httpx.Client(proxies=proxy, timeout=60.0)
+        kwargs["http_client"] = http_client
+        logger.info("Anthropic client uses proxy egress")
+    _client_singleton = anthropic.Anthropic(**kwargs)
+    return _client_singleton
 
 
 def chat(

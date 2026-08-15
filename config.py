@@ -32,6 +32,13 @@ FORMULARY_FREE_LIMIT_PER_24H = int(os.getenv("FORMULARY_FREE_LIMIT_PER_24H", "2"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 CLAUDE_MAX_TOKENS = int(os.getenv("CLAUDE_MAX_TOKENS", "2048") or 2048)
+# Optional HTTPS proxy for Anthropic (e.g. NL residential/datacenter):
+# http://user:pass@host:port  or  socks5://user:pass@host:port
+ANTHROPIC_PROXY = (
+    os.getenv("ANTHROPIC_PROXY", "").strip()
+    or os.getenv("HTTPS_PROXY", "").strip()
+    or os.getenv("https_proxy", "").strip()
+)
 
 VK_GROUP_TOKEN = os.getenv("VK_GROUP_TOKEN", "")
 VK_GROUP_ID = int(os.getenv("VK_GROUP_ID", "0") or 0)
