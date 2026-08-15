@@ -22,28 +22,37 @@ def _vk_button_label(text: str, max_len: int = VK_BUTTON_LABEL_MAX) -> str:
 
 
 def main_menu_keyboard() -> str:
+    """Layout matches product mock: full-width emergency/dosage/calc, then pairs."""
+    # VK colors: only negative/primary/positive/secondary (no orange/purple).
     kb = VkKeyboard(one_time=False)
     kb.add_button("Экстренная помощь", color=VkKeyboardColor.NEGATIVE)
+    kb.add_line()
+    kb.add_button(
+        "Дозировки препаратов (для врачей)",
+        color=VkKeyboardColor.PRIMARY,
+    )
+    kb.add_line()
+    kb.add_button(
+        "Калькулятор дозы (для владельцев)",
+        color=VkKeyboardColor.PRIMARY,
+    )
+    kb.add_line()
     kb.add_button("Консультация", color=VkKeyboardColor.PRIMARY)
-    kb.add_line()
-    kb.add_button("Дозировки препаратов", color=VkKeyboardColor.PRIMARY)
-    kb.add_button("Калькулятор дозы", color=VkKeyboardColor.PRIMARY)
-    kb.add_line()
     kb.add_button(one_time_button_label(), color=VkKeyboardColor.PRIMARY)
-    kb.add_button("Мои животные", color=VkKeyboardColor.SECONDARY)
     kb.add_line()
-    kb.add_button("Мои заявки", color=VkKeyboardColor.SECONDARY)
+    kb.add_button("Мои животные", color=VkKeyboardColor.SECONDARY)
     kb.add_button("Моя подписка", color=VkKeyboardColor.SECONDARY)
     kb.add_line()
     kb.add_button("О проекте", color=VkKeyboardColor.SECONDARY)
     kb.add_button("Контакты", color=VkKeyboardColor.SECONDARY)
     kb.add_line()
+    kb.add_button("Мои заявки", color=VkKeyboardColor.SECONDARY)
     kb.add_button("Рекомендуемые врачи", color=VkKeyboardColor.SECONDARY)
+    kb.add_line()
     kb.add_button("Партнёрские клиники", color=VkKeyboardColor.SECONDARY)
     kb.add_line()
     kb.add_button("Пробный период 5 дней", color=VkKeyboardColor.POSITIVE)
     kb.add_line()
-    # VK API не поддерживает оранжевый; negative (#E64646) — ближайший акцентный цвет
     kb.add_button("Отменить автопродление", color=VkKeyboardColor.NEGATIVE)
     return keyboard_to_json(kb)
 

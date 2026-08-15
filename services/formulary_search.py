@@ -27,9 +27,17 @@ class DrugHit:
 
     @property
     def display_name(self) -> str:
+        """Prefer RU name for the RU-only product surface."""
         if self.canonical_name_ru and self.canonical_name_en:
             return f"{self.canonical_name_ru} ({self.canonical_name_en})"
-        return self.canonical_name_ru or self.canonical_name_en or self.matched_alias
+        if self.canonical_name_ru:
+            return self.canonical_name_ru
+        if self.matched_alias and self.matched_alias.lower() != (
+            self.canonical_name_en or ""
+        ).lower():
+            en = self.canonical_name_en or ""
+            return f"{self.matched_alias}" + (f" / {en}" if en else "")
+        return self.canonical_name_en or self.matched_alias or f"#{self.drug_id}"
 
 
 @dataclass
@@ -245,7 +253,7 @@ def search_drugs(
 
 
 def format_drug_context(drug: DrugRecord, *, max_doses: int = 40) -> str:
-    """Compact structured context for Claude dosage_brief / dosage_qa."""
+    """Compact structured context for Claude dosage_brief / dosage_qa (source language)."""
     lines = [
         f"ID: {drug.id}",
         f"EN: {drug.canonical_name_en}",
@@ -269,3 +277,105 @@ def format_drug_context(drug: DrugRecord, *, max_doses: int = 40) -> str:
             f"(min={d.get('dose_min')} max={d.get('dose_max')} {d.get('dose_unit')})"
         )
     return "\n".join(lines)
+
+
+TAXA_RU = {
+    "fish": "Рыбы",
+    "mammals": "Млекопитающие",
+    "birds": "Птицы",
+    "reptiles": "Рептилии",
+    "amphibians": "Амфибии",
+    "invertebrates": "Беспозвоночные",
+    "other": "Другие / прочие",
+}
+
+SOURCE_RU = {
+    "bsava": "BSAVA",
+    "carpenter": "Carpenter",
+    "manual": "ручной справочник (RU)",
+}
+
+
+def _taxa_ru(taxa: str | None) -> str:
+    key = (taxa or "other").lower()
+    return TAXA_RU.get(key, taxa or "прочие")
+
+
+def _source_ru(source: str | None) -> str:
+    key = (source or "").lower()
+    return SOURCE_RU.get(key, source or "неизвестно")
+
+
+def format_brief_ru(drug: DrugRecord, *, max_doses: int = 35) -> str:
+    """
+    User-facing card summary in Russian (no LLM).
+    Empty EN monograph fields are omitted; doses are always listed with RU labels.
+    """
+    title = drug.canonical_name_ru or drug.canonical_name_en or f"#{drug.id}"
+    lines: list[str] = [f"💊 {title}"]
+    if drug.canonical_name_ru and drug.canonical_name_en:
+        lines.append(f"Международное название: {drug.canonical_name_en}")
+    elif drug.canonical_name_en and not drug.canonical_name_ru:
+        lines.append(f"Название (EN): {drug.canonical_name_en}")
+    if drug.trade_names:
+        lines.append(f"Торговые названия: {', '.join(drug.trade_names)}")
+    if drug.sources:
+        lines.append(f"Источники: {', '.join(_source_ru(s) for s in drug.sources)}")
+    lines.append("")
+
+    sections = [
+        ("Формы выпуска", drug.formulations),
+        ("Действие", drug.action),
+        ("Применение", drug.use or drug.full_text_ru),
+        ("Меры предосторожности", drug.safety_handling),
+        ("Противопоказания", drug.contraindications),
+        ("Побочные эффекты", drug.adverse_reactions),
+        ("Лекарственные взаимодействия", drug.drug_interactions),
+    ]
+    has_text = False
+    for title_ru, value in sections:
+        text = (value or "").strip()
+        if not text:
+            continue
+        has_text = True
+        lines.append(f"{title_ru}:")
+        lines.append(text)
+        lines.append("")
+
+    if drug.pom_note and drug.pom_note.strip():
+        lines.append(f"Статус / POM: {drug.pom_note.strip()}")
+        lines.append("")
+
+    if drug.doses:
+        lines.append("Дозы:")
+        by_taxa: dict[str, list[dict[str, Any]]] = {}
+        for d in drug.doses[:max_doses]:
+            by_taxa.setdefault(d.get("taxa") or "other", []).append(d)
+        for taxa, rows in by_taxa.items():
+            lines.append(f"▸ {_taxa_ru(taxa)}")
+            for d in rows:
+                species = (d.get("species_note") or "").strip()
+                raw = (d.get("raw_text") or "").strip()
+                dmin, dmax, unit = d.get("dose_min"), d.get("dose_max"), d.get("dose_unit") or ""
+                src = _source_ru(d.get("source"))
+                head = f"  • {species}: " if species else "  • "
+                if raw:
+                    lines.append(f"{head}{raw} [{src}]")
+                elif dmin is not None or dmax is not None:
+                    if dmin is not None and dmax is not None and dmin != dmax:
+                        dose_s = f"{dmin}–{dmax} {unit}".strip()
+                    else:
+                        dose_s = f"{dmin if dmin is not None else dmax} {unit}".strip()
+                    lines.append(f"{head}{dose_s} [{src}]")
+                else:
+                    lines.append(f"{head}(текст дозы не разобран) [{src}]")
+        if len(drug.doses) > max_doses:
+            lines.append(f"  … ещё {len(drug.doses) - max_doses} записей в справочнике")
+        lines.append("")
+    elif not has_text:
+        lines.append("В карточке пока нет структурированных доз и описания.")
+        lines.append("")
+
+    lines.append("Можно открыть «Калькулятор дозы» для расчёта.")
+    return "\n".join(lines).strip()
+

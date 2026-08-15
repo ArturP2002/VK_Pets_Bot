@@ -12,7 +12,7 @@ from services import dosage_access, dosage_service, session, user_service
 
 logger = logging.getLogger(__name__)
 
-MENU_LABEL = "Дозировки препаратов"
+MENU_LABEL = "Дозировки препаратов (для врачей)"
 
 
 def start_dosage(peer_id: int, vk_user_id: int):
@@ -41,7 +41,7 @@ def start_dosage(peer_id: int, vk_user_id: int):
     session.set_state(vk_user_id, states.DOSAGE_WAIT_QUERY, {})
     vk.send_message(
         peer_id,
-        "💊 Дозировки препаратов\n\n"
+        "💊 Дозировки препаратов (для врачей)\n\n"
         "Введите название препарата (латиницей или по-русски)."
         f"{hint}",
         back_menu_keyboard(),
@@ -58,12 +58,11 @@ def handle_dosage_message(peer_id: int, vk_user_id: int, text: str) -> bool:
         return True
 
     normalized = text.lower()
-    if normalized in ("меню", "главное меню", "отмена", "cancel"):
+    if normalized in ("меню", "главное меню", "отмена", "cancel", "начать", "start", "/start"):
         session.clear_state(vk_user_id)
         from bot.handlers import common
 
-        user = user_service.get_or_create_user(vk_user_id)
-        common.send_main_menu(peer_id, user)
+        common.handle_start(peer_id, vk_user_id)
         return True
 
     user = user_service.get_or_create_user(vk_user_id)

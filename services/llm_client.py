@@ -45,17 +45,23 @@ def chat(
     user: str,
     model: str | None = None,
     max_tokens: int | None = None,
-    temperature: float = 0.2,
+    temperature: float | None = None,
 ) -> str:
-    """Plain text completion."""
+    """Plain text completion. Omits temperature by default (some Claude models reject it)."""
     client = _client()
-    message = client.messages.create(
-        model=model or config.CLAUDE_MODEL,
-        max_tokens=max_tokens or config.CLAUDE_MAX_TOKENS,
-        temperature=temperature,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
+    params: dict[str, Any] = {
+        "model": model or config.CLAUDE_MODEL,
+        "max_tokens": max_tokens or config.CLAUDE_MAX_TOKENS,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    }
+    if temperature is not None:
+        params["temperature"] = temperature
+    try:
+        message = client.messages.create(**params)
+    except Exception as exc:
+        # Surface as LLMError so handlers can fall back instead of crashing Long Poll.
+        raise LLMError(str(exc)) from exc
     parts = []
     for block in message.content:
         text = getattr(block, "text", None)
@@ -77,7 +83,6 @@ def chat_json(
         user=user,
         model=model,
         max_tokens=max_tokens,
-        temperature=0,
     )
     return parse_json_object(text)
 
@@ -102,35 +107,68 @@ def parse_json_object(text: str) -> dict[str, Any]:
     return data
 
 
+def strip_markdown_for_chat(text: str) -> str:
+    """Remove Markdown chrome so VK messages look clean / premium."""
+    if not text:
+        return ""
+    out = text.replace("\r\n", "\n").replace("\r", "\n")
+    out = re.sub(r"```[\w+-]*\n?", "", out)
+    out = out.replace("```", "")
+    # Headings: ### Title → Title
+    out = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", out)
+    # Bold / italic
+    out = re.sub(r"\*\*(.+?)\*\*", r"\1", out)
+    out = re.sub(r"__(.+?)__", r"\1", out)
+    out = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", out)
+    out = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"\1", out)
+    # Links [label](url) → label
+    out = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", out)
+    # Blockquotes
+    out = re.sub(r"(?m)^\s*>\s?", "", out)
+    # Horizontal rules
+    out = re.sub(r"(?m)^\s*([-*_]\s*){3,}\s*$", "", out)
+    # Markdown list markers → bullet
+    out = re.sub(r"(?m)^\s*[-*+]\s+", "• ", out)
+    out = re.sub(r"(?m)^\s*\d+\.\s+", "• ", out)
+    # Collapse excess blank lines
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
 def dosage_brief(drug_context: str, user_query: str = "") -> str:
     system = _load_prompt("dosage_brief") or (
-        "Ты ветеринарный помощник ExoCare. По карточке препарата из справочника "
-        "дай краткую сводку врачу на русском: мг/кг по таксонам/видам, путь введения, "
-        "отличия по показаниям, источники. Не выдумывай дозы вне переданного контекста. "
+        "Ты ветеринарный помощник ExoCare. Отвечай ТОЛЬКО на русском, без Markdown. "
+        "По карточке препарата дай краткую сводку врачу: мг/кг по таксонам/видам, "
+        "путь введения, отличия по показаниям, источники. Переведи весь EN-текст. "
+        "Не выдумывай дозы вне переданного контекста. "
         "В конце предложи кнопку «Калькулятор дозы»."
     )
-    user = f"Запрос врача: {user_query or 'краткая сводка'}\n\nКарточка:\n{drug_context}"
-    return chat(system=system, user=user)
+    user = (
+        f"Запрос врача: {user_query or 'краткая сводка'}\n\n"
+        "Сделай ответ полностью на русском, без Markdown-разметки.\n\n"
+        f"Карточка:\n{drug_context}"
+    )
+    return strip_markdown_for_chat(chat(system=system, user=user))
 
 
 def dosage_qa(drug_context: str, chunks: str, question: str) -> str:
     system = _load_prompt("dosage_qa") or (
         "Отвечай на вопрос врача строго по переданным секциям и RAG-чанкам. "
-        "Если данных нет — скажи «в справочнике нет данных». Язык ответа: русский."
+        "Если данных нет — скажи «в справочнике нет данных». Язык ответа: русский. Без Markdown."
     )
     user = (
         f"Вопрос: {question}\n\nКарточка:\n{drug_context}\n\nЧанки:\n{chunks or '(нет)'}"
     )
-    return chat(system=system, user=user)
+    return strip_markdown_for_chat(chat(system=system, user=user))
 
 
 def ask_ai_fallback(question: str) -> str:
     system = _load_prompt("ask_ai_fallback") or (
         "Ты ветеринарный ИИ-помощник. Препарата нет в локальной базе. "
         "Ответь осторожно и обязательно добавь жёсткий дисклеймер: "
-        "это не замена справочнику и клиническому решению врача; проверь первоисточник."
+        "это не замена справочнику и клиническому решению врача; проверь первоисточник. Без Markdown."
     )
-    return chat(system=system, user=question)
+    return strip_markdown_for_chat(chat(system=system, user=question))
 
 
 def calc_extract(free_text: str) -> dict[str, Any]:

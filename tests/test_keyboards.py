@@ -38,8 +38,11 @@ def test_main_menu_has_dosage_and_calculator():
     from bot.keyboards import main_menu_keyboard
 
     kb = main_menu_keyboard()
-    assert "Дозировки препаратов" in kb
-    assert "Калькулятор дозы" in kb
+    assert "Дозировки препаратов (для врачей)" in kb
+    assert "Калькулятор дозы (для владельцев)" in kb
+    assert kb.index("Экстренная помощь") < kb.index("Дозировки препаратов")
+    assert kb.index("Дозировки препаратов") < kb.index("Калькулятор дозы")
+    assert kb.index("Калькулятор дозы") < kb.index("Консультация")
 
 
 def test_dosage_upsell_keyboard():

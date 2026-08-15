@@ -43,12 +43,14 @@ def deliver_brief(
     context = formulary_search.format_drug_context(drug)
     try:
         if not llm_client.is_configured():
-            text = _fallback_brief(drug, context)
+            text = _fallback_brief(drug)
         else:
             text = llm_client.dosage_brief(context, user_query)
+            if not (text or "").strip():
+                text = _fallback_brief(drug)
     except llm_client.LLMError as exc:
         logger.warning("dosage_brief failed: %s", exc)
-        text = _fallback_brief(drug, context)
+        text = _fallback_brief(drug)
 
     dosage_access.record_usage(user.vk_id, kind="dosage_hit", drug_id=drug_id)
     return DosageOutcome(kind="brief", text=text, drug_id=drug_id, counted=True)
@@ -66,8 +68,9 @@ def answer_qa(user: User, drug_id: int, question: str) -> DosageOutcome:
     try:
         if not llm_client.is_configured():
             text = (
-                "ИИ недоступен (нет ANTHROPIC_API_KEY). "
-                "Кратко по карточке:\n\n" + context[:3500]
+                "Полный ИИ-ответ недоступен (нет ANTHROPIC_API_KEY).\n\n"
+                "Краткая карточка на русском:\n\n"
+                + formulary_search.format_brief_ru(drug)
             )
         else:
             text = llm_client.dosage_qa(context, chunks_text, question)
@@ -92,7 +95,8 @@ def ask_ai(user: User, question: str) -> DosageOutcome:
     try:
         if not llm_client.is_configured():
             text = (
-                "ИИ недоступен (нет ANTHROPIC_API_KEY).\n\n"
+                "ИИ недоступен: в .env не задан ANTHROPIC_API_KEY.\n\n"
+                "Без ключа Claude нельзя перевести ответ и ответить вне справочника.\n"
                 "⚠️ Это не замена справочнику и клиническому решению врача."
             )
         else:
@@ -107,15 +111,15 @@ def ask_ai(user: User, question: str) -> DosageOutcome:
     return DosageOutcome(kind="ask_ai", text=text, counted=True)
 
 
-def _fallback_brief(drug: formulary_search.DrugRecord, context: str) -> str:
-    name = drug.canonical_name_ru or drug.canonical_name_en
-    lines = [
-        f"💊 {name}",
-        "",
-        "Сводка по справочнику (без ИИ — нет API-ключа):",
-        "",
-        context[:3500],
-        "",
-        "Можно открыть «Калькулятор дозы» для расчёта.",
-    ]
-    return "\n".join(lines)
+def _fallback_brief(drug: formulary_search.DrugRecord) -> str:
+    """Always Russian UI labels; no English field dump."""
+    body = formulary_search.format_brief_ru(drug)
+    note = ""
+    if not llm_client.is_configured():
+        note = (
+            "\n\n⚠️ Перевод полного описания через Claude недоступен "
+            "(нет ANTHROPIC_API_KEY). Ниже — структурированная сводка "
+            "по справочнику на русском; фрагменты доз из EN-источников "
+            "могут остаться на языке оригинала."
+        )
+    return body + note

@@ -18,7 +18,7 @@ from services import (
 
 logger = logging.getLogger(__name__)
 
-MENU_LABEL = "Калькулятор дозы"
+MENU_LABEL = "Калькулятор дозы (для владельцев)"
 
 FIELD_PROMPTS = {
     "weight_kg": "Укажите вес животного в кг (число).",
@@ -49,7 +49,7 @@ def start_calculator(peer_id: int, vk_user_id: int):
     session.set_state(vk_user_id, states.CALC_WAIT_TEXT, {"extract": {}})
     vk.send_message(
         peer_id,
-        "🧮 Калькулятор дозы\n\n"
+        "🧮 Калькулятор дозы (для владельцев)\n\n"
         "Опишите свободным текстом, например:\n"
         "«Мелоксикам, кролик 1.2 кг, 0.2 мг/кг, таблетки по 1 мг»\n"
         "или «раствор 5 мг/мл, птица 0.08 кг, 10 мг/кг».\n\n"
@@ -69,12 +69,11 @@ def handle_calculator_message(peer_id: int, vk_user_id: int, text: str) -> bool:
         return True
 
     normalized = text.lower()
-    if normalized in ("меню", "главное меню", "отмена", "cancel"):
+    if normalized in ("меню", "главное меню", "отмена", "cancel", "начать", "start", "/start"):
         session.clear_state(vk_user_id)
         from bot.handlers import common
 
-        user = user_service.get_or_create_user(vk_user_id)
-        common.send_main_menu(peer_id, user)
+        common.handle_start(peer_id, vk_user_id)
         return True
 
     user = user_service.get_or_create_user(vk_user_id)

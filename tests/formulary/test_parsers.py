@@ -135,3 +135,64 @@ def test_llm_parse_json_object():
 
     assert parse_json_object('{"a": 1}')["a"] == 1
     assert parse_json_object("```json\n{\"drug\": \"x\"}\n```")["drug"] == "x"
+
+
+def test_strip_markdown_for_chat():
+    from services.llm_client import strip_markdown_for_chat
+
+    raw = (
+        "## Фентанил\n\n"
+        "**Источник:** Carpenter\n\n"
+        "### Дозы\n"
+        "- Мыши: 0.025–0.6 мг/кг\n"
+        "- Общие: **5–10** мкг/кг\n"
+    )
+    clean = strip_markdown_for_chat(raw)
+    assert "##" not in clean
+    assert "**" not in clean
+    assert "###" not in clean
+    assert "Фентанил" in clean
+    assert "• Мыши:" in clean
+    assert "5–10" in clean
+
+
+def test_format_brief_ru_labels_and_doses():
+    from services.formulary_search import DrugRecord, format_brief_ru
+
+    drug = DrugRecord(
+        id=1,
+        canonical_name_en="Fentanyl",
+        canonical_name_ru="",
+        trade_names=[],
+        pom_note="",
+        formulations="",
+        action="",
+        use="",
+        safety_handling="",
+        contraindications="",
+        adverse_reactions="",
+        drug_interactions="",
+        full_text_en="",
+        full_text_ru="",
+        sources=["carpenter"],
+        doses=[
+            {
+                "taxa": "mammals",
+                "species_note": "Mice",
+                "raw_text": "0.025-0.6 mg/kg SC",
+                "dose_min": 0.025,
+                "dose_max": 0.6,
+                "dose_unit": "mg/kg",
+                "source": "carpenter",
+            }
+        ],
+        aliases=["Fentanyl"],
+    )
+    text = format_brief_ru(drug)
+    assert "Action:" not in text
+    assert "DOSES:" not in text
+    assert "Млекопитающие" in text
+    assert "Carpenter" in text or "carpenter" not in text.lower() or "Carpenter" in text
+    assert "Дозы:" in text
+    assert "0.025-0.6 mg/kg" in text
+    assert "Калькулятор дозы" in text
