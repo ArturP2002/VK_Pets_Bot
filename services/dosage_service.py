@@ -8,6 +8,7 @@ from typing import Any
 
 import config
 from models import User
+from scripts.formulary.junk_names import is_junk_drug_name
 from services import dosage_access, formulary_rag, formulary_search, llm_client
 
 logger = logging.getLogger(__name__)
@@ -28,9 +29,12 @@ def search(query: str, *, limit: int = 5) -> list[formulary_search.DrugHit]:
 
 def pick_search_hits(hits: list[formulary_search.DrugHit]) -> list[formulary_search.DrugHit]:
     """
-    Collapse search results for UI: one exact hit → single card;
+    Collapse search results for UI: drop junk, dedupe labels, one exact hit → card;
     several exact hits → show only those; otherwise keep fuzzy list.
     """
+    if not hits:
+        return hits
+    hits = formulary_search.filter_search_hits(hits)
     if not hits:
         return hits
     exact = [h for h in hits if h.is_exact]
@@ -51,6 +55,17 @@ def deliver_brief(
     drug = formulary_search.get_drug(drug_id)
     if not drug:
         return DosageOutcome(kind="error", text="Препарат не найден в справочнике.")
+
+    if is_junk_drug_name(drug.canonical_name_en) or is_junk_drug_name(
+        drug.canonical_name_ru
+    ):
+        return DosageOutcome(
+            kind="miss",
+            text=(
+                f"Препарат «{user_query or drug.canonical_name_ru or drug.canonical_name_en}» "
+                "не найден в справочнике."
+            ),
+        )
 
     if apply_delay and config.FORMULARY_DOSAGE_DELAY_SEC > 0:
         time.sleep(config.FORMULARY_DOSAGE_DELAY_SEC)

@@ -14,6 +14,7 @@ from rapidfuzz import fuzz, process
 
 import config
 from scripts.formulary.common import normalize_name, transliterate_ru
+from scripts.formulary.junk_names import is_junk_drug_name
 from scripts.formulary.schema import ensure_schema_extensions
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,47 @@ def _adjust_score_for_query_lang(
     if alias_lang in ("en", "tr", "") and not ru_cyrillic:
         return max(0.0, score - 15.0)
     return score
+
+
+def _source_priority(sources: list[str]) -> int:
+    order = {"manual": 3, "bsava": 2, "carpenter": 1}
+    return max((order.get(str(s).lower(), 0) for s in sources), default=0)
+
+
+def _is_junk_hit(hit: DrugHit) -> bool:
+    for name in (hit.canonical_name_en, hit.canonical_name_ru, hit.matched_alias):
+        if name and is_junk_drug_name(name):
+            return True
+    return is_junk_drug_name(hit.display_name)
+
+
+def _dedupe_by_display_name(hits: list[DrugHit]) -> list[DrugHit]:
+    """One button per visible label; keep the best-ranked hit."""
+    best: dict[str, DrugHit] = {}
+    for hit in hits:
+        key = normalize_name(hit.display_name)
+        if not key:
+            continue
+        prev = best.get(key)
+        if prev is None:
+            best[key] = hit
+            continue
+        hit_key = (
+            int(hit.is_exact),
+            hit.score,
+            _source_priority(hit.sources),
+        )
+        prev_key = (
+            int(prev.is_exact),
+            prev.score,
+            _source_priority(prev.sources),
+        )
+        if hit_key > prev_key:
+            best[key] = hit
+    return sorted(
+        best.values(),
+        key=lambda h: (-int(h.is_exact), -h.score, h.display_name.lower()),
+    )
 
 
 def _store_hit(best: dict[int, DrugHit], hit: DrugHit) -> None:
@@ -495,14 +537,20 @@ def search_drugs(
             )
 
         hits = sorted(best.values(), key=lambda h: (-h.score, h.display_name.lower()))
-        for hit in hits[:limit]:
+        for hit in hits:
             if not _has_cyrillic(hit.canonical_name_ru or ""):
                 hit.canonical_name_ru = resolve_display_name_ru(
                     hit, db_path=db_path, use_llm=False
                 )
-        return hits[:limit]
+        return filter_search_hits(hits)[:limit]
     finally:
         conn.close()
+
+
+def filter_search_hits(hits: list[DrugHit]) -> list[DrugHit]:
+    """Remove junk entries and duplicate visible labels."""
+    cleaned = [h for h in hits if not _is_junk_hit(h)]
+    return _dedupe_by_display_name(cleaned)
 
 
 def format_drug_context(drug: DrugRecord, *, max_doses: int = 40) -> str:
