@@ -506,7 +506,7 @@ def search_drugs(
 
 
 def format_drug_context(drug: DrugRecord, *, max_doses: int = 40) -> str:
-    """Compact structured context for Claude dosage_brief / dosage_qa (source language)."""
+    """Compact structured context for dosage_brief / dosage_qa (source language)."""
     lines = [
         f"ID: {drug.id}",
         f"EN: {drug.canonical_name_en}",

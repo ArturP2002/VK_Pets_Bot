@@ -138,7 +138,8 @@ def translate_drug_names_batch(
 
     if not llm_client or not llm_client.is_configured():
         logger.warning(
-            "ANTHROPIC_API_KEY not set; skipping AI drug name translation "
+            "LLM is not configured (set LLM_PROVIDER and the matching API key); "
+            "skipping AI drug name translation "
             "(%s drugs will use transliteration fallback)",
             len(still_pending),
         )

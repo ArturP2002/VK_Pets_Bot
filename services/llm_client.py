@@ -1,4 +1,4 @@
-"""Anthropic Claude client for dosage / calculator flows."""
+"""LLM client for dosage / calculator flows (OpenAI or Anthropic)."""
 from __future__ import annotations
 
 import json
@@ -13,9 +13,12 @@ logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(config.BASE_DIR) / "prompts"
 
+_anthropic_client = None
+_openai_client = None
+
 
 class LLMError(RuntimeError):
-    """Raised when Claude call fails or is not configured."""
+    """Raised when an LLM call fails or the selected provider is not configured."""
 
 
 def _load_prompt(name: str) -> str:
@@ -25,38 +28,96 @@ def _load_prompt(name: str) -> str:
     return ""
 
 
+def provider_name() -> str:
+    """Normalized provider: openai | anthropic."""
+    raw = (getattr(config, "LLM_PROVIDER", "") or "").strip().lower()
+    if raw in ("openai", "gpt"):
+        return "openai"
+    if raw in ("claude", "anthropic"):
+        return "anthropic"
+    return "anthropic"
+
+
 def is_configured() -> bool:
-    return bool(config.ANTHROPIC_API_KEY)
+    if provider_name() == "anthropic":
+        return bool(config.ANTHROPIC_API_KEY)
+    return bool(getattr(config, "OPENAI_API_KEY", "") or "")
 
 
-_client_singleton = None
+def reset_clients() -> None:
+    """Drop cached SDK clients (tests / after .env change)."""
+    global _anthropic_client, _openai_client
+    _anthropic_client = None
+    _openai_client = None
 
 
-def _client():
-    """Anthropic client; optional ANTHROPIC_PROXY / HTTPS_PROXY for geo egress."""
-    global _client_singleton
-    if _client_singleton is not None:
-        return _client_singleton
+def _httpx_client(proxy: str):
+    import httpx
+
+    try:
+        return httpx.Client(proxy=proxy, timeout=60.0)
+    except TypeError:
+        return httpx.Client(proxies=proxy, timeout=60.0)
+
+
+def _anthropic():
+    global _anthropic_client
+    if _anthropic_client is not None:
+        return _anthropic_client
     if not config.ANTHROPIC_API_KEY:
         raise LLMError("ANTHROPIC_API_KEY is not set")
     try:
         import anthropic
-        import httpx
     except ImportError as exc:
         raise LLMError("anthropic package is not installed") from exc
 
     kwargs: dict[str, Any] = {"api_key": config.ANTHROPIC_API_KEY}
     proxy = (getattr(config, "ANTHROPIC_PROXY", None) or "").strip()
     if proxy:
-        # httpx 0.28+: proxy= ; older: proxies=
-        try:
-            http_client = httpx.Client(proxy=proxy, timeout=60.0)
-        except TypeError:
-            http_client = httpx.Client(proxies=proxy, timeout=60.0)
-        kwargs["http_client"] = http_client
+        kwargs["http_client"] = _httpx_client(proxy)
         logger.info("Anthropic client uses proxy egress")
-    _client_singleton = anthropic.Anthropic(**kwargs)
-    return _client_singleton
+    _anthropic_client = anthropic.Anthropic(**kwargs)
+    return _anthropic_client
+
+
+def _openai():
+    global _openai_client
+    if _openai_client is not None:
+        return _openai_client
+    key = (getattr(config, "OPENAI_API_KEY", "") or "").strip()
+    if not key:
+        raise LLMError("OPENAI_API_KEY is not set")
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise LLMError("openai package is not installed") from exc
+
+    kwargs: dict[str, Any] = {"api_key": key}
+    proxy = (getattr(config, "OPENAI_PROXY", None) or "").strip()
+    if proxy:
+        kwargs["http_client"] = _httpx_client(proxy)
+        logger.info("OpenAI client uses proxy egress")
+    _openai_client = OpenAI(**kwargs)
+    return _openai_client
+
+
+def _default_model() -> str:
+    if provider_name() == "anthropic":
+        return config.CLAUDE_MODEL
+    return getattr(config, "OPENAI_MODEL", "gpt-4.1")
+
+
+def _max_tokens(explicit: int | None) -> int:
+    if explicit is not None:
+        return explicit
+    return int(getattr(config, "LLM_MAX_TOKENS", None) or config.CLAUDE_MAX_TOKENS)
+
+
+def _openai_token_kwargs(model: str, max_tokens: int) -> dict[str, int]:
+    low = (model or "").lower()
+    if low.startswith("gpt-5") or low.startswith("o1") or low.startswith("o3"):
+        return {"max_completion_tokens": max_tokens}
+    return {"max_tokens": max_tokens}
 
 
 def chat(
@@ -66,12 +127,39 @@ def chat(
     model: str | None = None,
     max_tokens: int | None = None,
     temperature: float | None = None,
+    json_mode: bool = False,
 ) -> str:
-    """Plain text completion. Omits temperature by default (some Claude models reject it)."""
-    client = _client()
+    """Plain text completion via the provider selected in LLM_PROVIDER."""
+    if provider_name() == "anthropic":
+        return _chat_anthropic(
+            system=system,
+            user=user,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+    return _chat_openai(
+        system=system,
+        user=user,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        json_mode=json_mode,
+    )
+
+
+def _chat_anthropic(
+    *,
+    system: str,
+    user: str,
+    model: str | None,
+    max_tokens: int | None,
+    temperature: float | None,
+) -> str:
+    client = _anthropic()
     params: dict[str, Any] = {
         "model": model or config.CLAUDE_MODEL,
-        "max_tokens": max_tokens or config.CLAUDE_MAX_TOKENS,
+        "max_tokens": _max_tokens(max_tokens),
         "system": system,
         "messages": [{"role": "user", "content": user}],
     }
@@ -80,7 +168,6 @@ def chat(
     try:
         message = client.messages.create(**params)
     except Exception as exc:
-        # Surface as LLMError so handlers can fall back instead of crashing Long Poll.
         raise LLMError(str(exc)) from exc
     parts = []
     for block in message.content:
@@ -90,6 +177,40 @@ def chat(
     return "\n".join(parts).strip()
 
 
+def _chat_openai(
+    *,
+    system: str,
+    user: str,
+    model: str | None,
+    max_tokens: int | None,
+    temperature: float | None,
+    json_mode: bool,
+) -> str:
+    client = _openai()
+    model_name = model or _default_model()
+    params: dict[str, Any] = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        **_openai_token_kwargs(model_name, _max_tokens(max_tokens)),
+    }
+    if temperature is not None:
+        params["temperature"] = temperature
+    if json_mode:
+        params["response_format"] = {"type": "json_object"}
+    try:
+        message = client.chat.completions.create(**params)
+    except Exception as exc:
+        raise LLMError(str(exc)) from exc
+    choice = (message.choices or [None])[0]
+    if choice is None:
+        return ""
+    content = getattr(choice.message, "content", None) or ""
+    return str(content).strip()
+
+
 def chat_json(
     *,
     system: str,
@@ -97,12 +218,13 @@ def chat_json(
     model: str | None = None,
     max_tokens: int | None = None,
 ) -> dict[str, Any]:
-    """Ask Claude for a JSON object; parse robustly."""
+    """Ask the LLM for a JSON object; parse robustly."""
     text = chat(
         system=system + "\n\nRespond with a single JSON object only, no markdown.",
         user=user,
         model=model,
         max_tokens=max_tokens,
+        json_mode=True,
     )
     return parse_json_object(text)
 
@@ -120,10 +242,10 @@ def parse_json_object(text: str) -> dict[str, Any]:
         pass
     match = re.search(r"\{.*\}", cleaned, re.S)
     if not match:
-        raise LLMError(f"Claude did not return JSON: {text[:200]!r}")
+        raise LLMError(f"LLM did not return JSON: {text[:200]!r}")
     data = json.loads(match.group(0))
     if not isinstance(data, dict):
-        raise LLMError("Claude JSON root is not an object")
+        raise LLMError("LLM JSON root is not an object")
     return data
 
 

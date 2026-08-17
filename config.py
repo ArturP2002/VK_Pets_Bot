@@ -29,6 +29,9 @@ FORMULARY_RAG_TOP_K = int(os.getenv("FORMULARY_RAG_TOP_K", "6") or 6)
 FORMULARY_DOSAGE_DELAY_SEC = int(os.getenv("FORMULARY_DOSAGE_DELAY_SEC", "30") or 30)
 FORMULARY_FREE_LIMIT_PER_24H = int(os.getenv("FORMULARY_FREE_LIMIT_PER_24H", "2") or 2)
 
+# LLM: openai | anthropic (claude — alias). Switch without code changes.
+LLM_PROVIDER = (os.getenv("LLM_PROVIDER", "anthropic") or "anthropic").strip().lower()
+
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 CLAUDE_MAX_TOKENS = int(os.getenv("CLAUDE_MAX_TOKENS", "2048") or 2048)
@@ -38,6 +41,17 @@ ANTHROPIC_PROXY = (
     os.getenv("ANTHROPIC_PROXY", "").strip()
     or os.getenv("HTTPS_PROXY", "").strip()
     or os.getenv("https_proxy", "").strip()
+)
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
+OPENAI_PROXY = (
+    os.getenv("OPENAI_PROXY", "").strip()
+    or os.getenv("HTTPS_PROXY", "").strip()
+    or os.getenv("https_proxy", "").strip()
+)
+LLM_MAX_TOKENS = int(
+    os.getenv("LLM_MAX_TOKENS", os.getenv("CLAUDE_MAX_TOKENS", "2048")) or 2048
 )
 
 VK_GROUP_TOKEN = os.getenv("VK_GROUP_TOKEN", "")

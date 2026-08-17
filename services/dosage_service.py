@@ -83,7 +83,7 @@ def answer_qa(user: User, drug_id: int, question: str) -> DosageOutcome:
     try:
         if not llm_client.is_configured():
             text = (
-                "Полный ИИ-ответ недоступен (нет ANTHROPIC_API_KEY).\n\n"
+                "Полный ИИ-ответ недоступен (в .env не задан ключ выбранного провайдера).\n\n"
                 "Краткая карточка на русском:\n\n"
                 + formulary_search.format_brief_ru(drug)
             )
@@ -110,8 +110,9 @@ def ask_ai(user: User, question: str) -> DosageOutcome:
     try:
         if not llm_client.is_configured():
             text = (
-                "ИИ недоступен: в .env не задан ANTHROPIC_API_KEY.\n\n"
-                "Без ключа Claude нельзя перевести ответ и ответить вне справочника.\n"
+                "ИИ недоступен: в .env не задан ключ выбранного провайдера "
+                "(OPENAI_API_KEY или ANTHROPIC_API_KEY).\n\n"
+                "Без ключа нельзя перевести ответ и ответить вне справочника.\n"
                 "⚠️ Это не замена справочнику и клиническому решению врача."
             )
         else:
@@ -132,8 +133,8 @@ def _fallback_brief(drug: formulary_search.DrugRecord) -> str:
     note = ""
     if not llm_client.is_configured():
         note = (
-            "\n\n⚠️ Перевод полного описания через Claude недоступен "
-            "(нет ANTHROPIC_API_KEY). Ниже — структурированная сводка "
+            "\n\n⚠️ Перевод полного описания через ИИ недоступен "
+            "(нет ключа выбранного провайдера). Ниже — структурированная сводка "
             "по справочнику на русском; фрагменты доз из EN-источников "
             "могут остаться на языке оригинала."
         )
