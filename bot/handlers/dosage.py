@@ -131,13 +131,24 @@ def _handle_query(peer_id: int, user, query: str):
         return
 
     if len(hits) == 1:
-        _deliver_hit(peer_id, user, hits[0].drug_id, query, access.apply_delay)
+        _deliver_hit(
+            peer_id,
+            user,
+            hits[0].drug_id,
+            query,
+            access.apply_delay,
+            display_title=hits[0].display_name,
+        )
         return
 
     session.set_state(
         user.vk_id,
         states.DOSAGE_PICK,
-        {"last_query": query, "candidates": [h.drug_id for h in hits]},
+        {
+            "last_query": query,
+            "candidates": [h.drug_id for h in hits],
+            "candidate_labels": {h.drug_id: h.display_name for h in hits},
+        },
     )
     labels = "\n".join(f"• {h.display_name}" for h in hits)
     vk.send_message(
@@ -147,15 +158,27 @@ def _handle_query(peer_id: int, user, query: str):
     )
 
 
-def _deliver_hit(peer_id: int, user, drug_id: int, query: str, apply_delay: bool):
+def _deliver_hit(
+    peer_id: int,
+    user,
+    drug_id: int,
+    query: str,
+    apply_delay: bool,
+    *,
+    display_title: str = "",
+):
     vk.send_message(peer_id, "Ищу информацию по препарату…")
     outcome = dosage_service.deliver_brief(
-        user, drug_id, user_query=query, apply_delay=apply_delay
+        user,
+        drug_id,
+        user_query=query,
+        display_title=display_title,
+        apply_delay=apply_delay,
     )
     session.set_state(
         user.vk_id,
         states.DOSAGE_QA,
-        {"drug_id": drug_id, "last_query": query},
+        {"drug_id": drug_id, "last_query": query, "display_title": display_title or query},
     )
     vk.send_message(
         peer_id,
@@ -164,12 +187,13 @@ def _deliver_hit(peer_id: int, user, drug_id: int, query: str, apply_delay: bool
             can_ask_ai=dosage_access.can_ask_ai(user)
         ),
     )
-    vk.send_message(
-        peer_id,
-        "Можете задать уточняющий вопрос по этому препарату "
-        "или открыть калькулятор дозы.",
-        back_menu_keyboard(),
-    )
+    if outcome.kind == "brief":
+        vk.send_message(
+            peer_id,
+            "Можете задать уточняющий вопрос по этому препарату "
+            "или открыть калькулятор дозы.",
+            back_menu_keyboard(),
+        )
 
 
 def pick_drug(peer_id: int, vk_user_id: int, drug_id: int) -> str | None:
@@ -185,7 +209,16 @@ def pick_drug(peer_id: int, vk_user_id: int, drug_id: int) -> str | None:
 
     data = session.get_payload(vk_user_id)
     query = data.get("last_query", "")
-    _deliver_hit(peer_id, user, drug_id, query, access.apply_delay)
+    labels = data.get("candidate_labels") or {}
+    display_title = labels.get(drug_id) or query
+    _deliver_hit(
+        peer_id,
+        user,
+        drug_id,
+        query,
+        access.apply_delay,
+        display_title=display_title,
+    )
     return "Готово"
 
 

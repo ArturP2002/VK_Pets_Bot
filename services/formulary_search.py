@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Any
 from rapidfuzz import fuzz, process
 
 import config
+from scripts.formulary.build_db import inn_match_key
 from scripts.formulary.common import normalize_name, transliterate_ru
 from scripts.formulary.junk_names import is_junk_drug_name
 from scripts.formulary.schema import ensure_schema_extensions
@@ -20,6 +22,37 @@ from scripts.formulary.schema import ensure_schema_extensions
 logger = logging.getLogger(__name__)
 
 FOREIGN_SOURCES = frozenset({"bsava", "carpenter"})
+
+_SALT_TOKENS = frozenset(
+    {
+        "hydrochloride",
+        "hydrobromide",
+        "maleate",
+        "acetate",
+        "sodium",
+        "potassium",
+        "phosphate",
+        "sulfate",
+        "sulphate",
+        "chloride",
+        "hydrate",
+        "mesylate",
+        "natrii",
+        "natriya",
+    }
+)
+
+_DOSE_AMOUNT_RE = re.compile(
+    r"(?i)\d+(?:[.,]\d+)?\s*(?:"
+    r"mg|µg|ug|mcg|g|ml|iu|u|%|"
+    r"мг|мкг|г|мл"
+    r")(?:\s*/\s*(?:kg|кг|g|г|lb|lbs|bodyweight|bw|м2|m2))?"
+)
+
+_VAGUE_DOSE_RE = re.compile(
+    r"(?i)(не указан|not specified|no (?:dose )?data|данных по|range not|"
+    r"not available|не разобран|dose range)"
+)
 
 
 @dataclass
@@ -106,6 +139,110 @@ def _adjust_score_for_query_lang(
     if alias_lang in ("en", "tr", "") and not ru_cyrillic:
         return max(0.0, score - 15.0)
     return score
+
+
+def _base_inn_key(name: str) -> str:
+    """Strip salts/forms so Pentobarbital sodium ≈ Pentobarbital."""
+    key = inn_match_key(name)
+    if not key:
+        return ""
+    parts = key.split()
+    while len(parts) > 1 and parts[-1] in _SALT_TOKENS:
+        parts.pop()
+    return " ".join(parts)
+
+
+def _hit_rank(hit: DrugHit) -> tuple:
+    return (int(hit.is_exact), hit.score, _source_priority(hit.sources), -hit.drug_id)
+
+
+def _load_drug_name_sets(conn: sqlite3.Connection) -> dict[int, set[str]]:
+    """All normalized labels per drug: aliases, canonical, trade, INN keys."""
+    sets: dict[int, set[str]] = defaultdict(set)
+    for row in conn.execute(
+        "SELECT id, canonical_name_en, canonical_name_ru, trade_names FROM drugs"
+    ):
+        drug_id = int(row["id"])
+        for field in ("canonical_name_en", "canonical_name_ru"):
+            val = (row[field] or "").strip()
+            if not val:
+                continue
+            sets[drug_id].add(normalize_name(val))
+            for key_fn in (inn_match_key, _base_inn_key):
+                key = key_fn(val)
+                if key:
+                    sets[drug_id].add(key)
+        for trade in json.loads(row["trade_names"] or "[]"):
+            cleaned = str(trade).strip()
+            if cleaned:
+                sets[drug_id].add(normalize_name(cleaned))
+    for row in conn.execute("SELECT drug_id, alias_norm FROM drug_aliases"):
+        sets[int(row["drug_id"])].add(row["alias_norm"])
+    return dict(sets)
+
+
+def _should_merge_drugs(
+    drug_a: int,
+    drug_b: int,
+    name_sets: dict[int, set[str]],
+    hits_by_id: dict[int, DrugHit],
+) -> bool:
+    set_a = name_sets.get(drug_a, set())
+    set_b = name_sets.get(drug_b, set())
+    if set_a & set_b:
+        return True
+    hit_a = hits_by_id.get(drug_a)
+    hit_b = hits_by_id.get(drug_b)
+    for hit, other_set in ((hit_a, set_b), (hit_b, set_a)):
+        if not hit:
+            continue
+        matched = normalize_name(hit.matched_alias or "")
+        if matched and matched in other_set:
+            return True
+    if hit_a and hit_b:
+        key_a = _base_inn_key(hit_a.canonical_name_en)
+        key_b = _base_inn_key(hit_b.canonical_name_en)
+        if key_a and key_b and key_a == key_b:
+            return True
+    return False
+
+
+def _dedupe_synonyms(
+    hits: list[DrugHit],
+    name_sets: dict[int, set[str]],
+) -> list[DrugHit]:
+    """Merge trade/INN duplicates (Nembutal + Pentobarbital sodium) into one hit."""
+    if len(hits) <= 1:
+        return hits
+    hits_by_id = {h.drug_id: h for h in hits}
+    drug_ids = [h.drug_id for h in hits]
+    parent = {did: did for did in drug_ids}
+
+    def find(drug_id: int) -> int:
+        while parent[drug_id] != drug_id:
+            parent[drug_id] = parent[parent[drug_id]]
+            drug_id = parent[drug_id]
+        return drug_id
+
+    def union(a: int, b: int) -> None:
+        root_a, root_b = find(a), find(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    for i, drug_a in enumerate(drug_ids):
+        for drug_b in drug_ids[i + 1 :]:
+            if _should_merge_drugs(drug_a, drug_b, name_sets, hits_by_id):
+                union(drug_a, drug_b)
+
+    clusters: dict[int, list[DrugHit]] = defaultdict(list)
+    for hit in hits:
+        clusters[find(hit.drug_id)].append(hit)
+
+    merged = [max(cluster, key=_hit_rank) for cluster in clusters.values()]
+    return sorted(
+        merged,
+        key=lambda h: (-int(h.is_exact), -h.score, h.display_name.lower()),
+    )
 
 
 def _source_priority(sources: list[str]) -> int:
@@ -537,20 +674,123 @@ def search_drugs(
             )
 
         hits = sorted(best.values(), key=lambda h: (-h.score, h.display_name.lower()))
+        name_sets = _load_drug_name_sets(conn)
         for hit in hits:
             if not _has_cyrillic(hit.canonical_name_ru or ""):
                 hit.canonical_name_ru = resolve_display_name_ru(
                     hit, db_path=db_path, use_llm=False
                 )
-        return filter_search_hits(hits)[:limit]
+        return filter_search_hits(hits, name_sets=name_sets)[:limit]
     finally:
         conn.close()
 
 
-def filter_search_hits(hits: list[DrugHit]) -> list[DrugHit]:
-    """Remove junk entries and duplicate visible labels."""
+def filter_search_hits(
+    hits: list[DrugHit],
+    *,
+    name_sets: dict[int, set[str]] | None = None,
+) -> list[DrugHit]:
+    """Remove junk, merge synonyms, dedupe visible labels."""
     cleaned = [h for h in hits if not _is_junk_hit(h)]
+    if name_sets:
+        cleaned = _dedupe_synonyms(cleaned, name_sets)
     return _dedupe_by_display_name(cleaned)
+
+
+def dose_row_has_usable_content(row: dict[str, Any]) -> bool:
+    if row.get("dose_min") is not None or row.get("dose_max") is not None:
+        return True
+    raw = (row.get("raw_text") or "").strip()
+    if not raw:
+        return False
+    if _DOSE_AMOUNT_RE.search(raw):
+        return True
+    if _VAGUE_DOSE_RE.search(raw):
+        return False
+    return False
+
+
+def _has_substantive_monograph(drug: DrugRecord) -> bool:
+    parts = (
+        drug.formulations,
+        drug.action,
+        drug.use,
+        drug.full_text_ru,
+        drug.contraindications,
+        drug.adverse_reactions,
+        drug.drug_interactions,
+    )
+    return sum(len((part or "").strip()) for part in parts) >= 80
+
+
+def has_usable_dose_data(drug: DrugRecord) -> bool:
+    """True when the card has numeric doses or a substantive monograph."""
+    if any(dose_row_has_usable_content(d) for d in drug.doses):
+        return True
+    return _has_substantive_monograph(drug)
+
+
+def resolve_display_title(
+    user_query: str = "",
+    *,
+    hit: DrugHit | None = None,
+    drug: DrugRecord | None = None,
+) -> str:
+    """Prefer the name the user typed or tapped."""
+    query = (user_query or "").strip()
+    if query:
+        return query
+    if hit is not None:
+        return hit.display_name
+    if drug is not None:
+        if drug.canonical_name_ru and _has_cyrillic(drug.canonical_name_ru):
+            return drug.canonical_name_ru.strip()
+        alias_ru = _pick_ru_alias(drug.aliases)
+        if alias_ru:
+            return alias_ru
+        tr = transliterate_ru(drug.canonical_name_en or "")
+        if tr:
+            return tr
+    return "Препарат"
+
+
+def apply_display_title(text: str, title: str) -> str:
+    """Ensure the card header matches the user's query/selection."""
+    cleaned_title = (title or "").strip()
+    body = (text or "").strip()
+    if not cleaned_title:
+        return body
+    header = f"💊 {cleaned_title}"
+    if not body:
+        return header
+    lines = body.splitlines()
+    if lines and lines[0].lstrip().startswith("💊"):
+        lines[0] = header
+        return "\n".join(lines).strip()
+    return f"{header}\n\n{body}"
+
+
+def format_empty_drug_message(drug: DrugRecord, *, display_title: str) -> str:
+    title = display_title or resolve_display_title(drug=drug)
+    sources = ", ".join(_source_ru(s) for s in drug.sources) if drug.sources else ""
+    lines = [
+        f"💊 {title}",
+        "",
+        "В справочнике есть запись по этому названию, но числовых доз и "
+        "структурированного описания пока нет.",
+    ]
+    if sources:
+        lines.append(f"Источники: {sources}")
+    lines.extend(
+        [
+            "",
+            "Проверьте первоисточник или воспользуйтесь «Спросить ИИ» "
+            "для общего ответа.",
+            "",
+            "Можно открыть «Калькулятор дозы» для расчёта по назначению врача.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def format_drug_context(drug: DrugRecord, *, max_doses: int = 40) -> str:
@@ -607,12 +847,17 @@ def _source_ru(source: str | None) -> str:
     return SOURCE_RU.get(key, source or "неизвестно")
 
 
-def format_brief_ru(drug: DrugRecord, *, max_doses: int = 35) -> str:
+def format_brief_ru(
+    drug: DrugRecord,
+    *,
+    max_doses: int = 35,
+    display_title: str | None = None,
+) -> str:
     """
     User-facing card summary in Russian (no LLM).
     Empty EN monograph fields are omitted; doses are always listed with RU labels.
     """
-    title = (
+    title = (display_title or "").strip() or (
         drug.canonical_name_ru
         if _has_cyrillic(drug.canonical_name_ru or "")
         else resolve_display_name_ru(drug, use_llm=False)

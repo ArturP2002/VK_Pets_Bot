@@ -50,21 +50,32 @@ def deliver_brief(
     drug_id: int,
     *,
     user_query: str = "",
+    display_title: str = "",
     apply_delay: bool = False,
 ) -> DosageOutcome:
     drug = formulary_search.get_drug(drug_id)
     if not drug:
         return DosageOutcome(kind="error", text="Препарат не найден в справочнике.")
 
+    title = formulary_search.resolve_display_title(
+        user_query or display_title,
+        drug=drug,
+    )
+
     if is_junk_drug_name(drug.canonical_name_en) or is_junk_drug_name(
         drug.canonical_name_ru
     ):
         return DosageOutcome(
             kind="miss",
-            text=(
-                f"Препарат «{user_query or drug.canonical_name_ru or drug.canonical_name_en}» "
-                "не найден в справочнике."
-            ),
+            text=f"Препарат «{title}» не найден в справочнике.",
+        )
+
+    if not formulary_search.has_usable_dose_data(drug):
+        return DosageOutcome(
+            kind="miss",
+            text=formulary_search.format_empty_drug_message(drug, display_title=title),
+            drug_id=drug_id,
+            counted=False,
         )
 
     if apply_delay and config.FORMULARY_DOSAGE_DELAY_SEC > 0:
@@ -73,15 +84,16 @@ def deliver_brief(
     context = formulary_search.format_drug_context(drug)
     try:
         if not llm_client.is_configured():
-            text = _fallback_brief(drug)
+            text = _fallback_brief(drug, display_title=title)
         else:
-            text = llm_client.dosage_brief(context, user_query)
+            text = llm_client.dosage_brief(context, user_query, display_title=title)
             if not (text or "").strip():
-                text = _fallback_brief(drug)
+                text = _fallback_brief(drug, display_title=title)
     except llm_client.LLMError as exc:
         logger.warning("dosage_brief failed: %s", exc)
-        text = _fallback_brief(drug)
+        text = _fallback_brief(drug, display_title=title)
 
+    text = formulary_search.apply_display_title(text, title)
     dosage_access.record_usage(user.vk_id, kind="dosage_hit", drug_id=drug_id)
     return DosageOutcome(kind="brief", text=text, drug_id=drug_id, counted=True)
 
@@ -142,9 +154,9 @@ def ask_ai(user: User, question: str) -> DosageOutcome:
     return DosageOutcome(kind="ask_ai", text=text, counted=True)
 
 
-def _fallback_brief(drug: formulary_search.DrugRecord) -> str:
+def _fallback_brief(drug: formulary_search.DrugRecord, *, display_title: str = "") -> str:
     """Always Russian UI labels; no English field dump."""
-    body = formulary_search.format_brief_ru(drug)
+    body = formulary_search.format_brief_ru(drug, display_title=display_title or None)
     note = ""
     if not llm_client.is_configured():
         note = (

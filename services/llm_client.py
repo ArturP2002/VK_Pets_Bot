@@ -277,7 +277,7 @@ def strip_markdown_for_chat(text: str) -> str:
     return out.strip()
 
 
-def dosage_brief(drug_context: str, user_query: str = "") -> str:
+def dosage_brief(drug_context: str, user_query: str = "", display_title: str = "") -> str:
     system = _load_prompt("dosage_brief") or (
         "Ты ветеринарный помощник ExoCare. Отвечай ТОЛЬКО на русском, без Markdown. "
         "По карточке препарата дай краткую сводку врачу: мг/кг по таксонам/видам, "
@@ -285,8 +285,15 @@ def dosage_brief(drug_context: str, user_query: str = "") -> str:
         "Не выдумывай дозы вне переданного контекста. "
         "В конце предложи кнопку «Калькулятор дозы»."
     )
+    title_line = ""
+    if (display_title or user_query or "").strip():
+        title_line = (
+            f"Показывай препарат в заголовке под названием: "
+            f"{(display_title or user_query).strip()}\n"
+        )
     user = (
-        f"Запрос врача: {user_query or 'краткая сводка'}\n\n"
+        f"Запрос врача: {user_query or 'краткая сводка'}\n"
+        f"{title_line}\n"
         "Сделай ответ полностью на русском, без Markdown-разметки.\n\n"
         f"Карточка:\n{drug_context}"
     )
