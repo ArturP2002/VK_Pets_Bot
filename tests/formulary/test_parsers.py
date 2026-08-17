@@ -196,3 +196,136 @@ def test_format_brief_ru_labels_and_doses():
     assert "Дозы:" in text
     assert "0.025-0.6 mg/kg" in text
     assert "Калькулятор дозы" in text
+
+
+def test_carpenter_junk_agent_names_rejected():
+    from scripts.formulary.extract_carpenter import _clean_agent_name, is_junk_agent_name
+
+    junk = [
+        "2nd-degree AV block",
+        "3rd-degree AV block",
+        "1st-degree AV block",
+        "Bundle branch block",
+        "Aerobic bacteria",
+        "Anaerobic bacteria",
+        "A/G ratio",
+        "A/G ratiob",
+        "A) + midazolam (Mi",
+        "F/f) + midazolam (Mi",
+        "K) + midazolam (Mi",
+        "K) + fentanyl (F",
+        "alfaxalone (A",
+        "alfaxalone (Al",
+        "acepromazine (A",
+        "African Green",
+        "African Grey",
+        "Amazon parrot",
+        "Amazon parrots",
+        "Eclectus parrot",
+        "Amazona spp.b",
+        "Agent",
+        "Agent(s",
+        "Measurements",
+        "TABLE9-2",
+        "TABL E 1-1",
+        "C ontents",
+    ]
+    for name in junk:
+        assert is_junk_agent_name(name), f"expected junk: {name!r}"
+        assert _clean_agent_name(name) == "", f"expected reject: {name!r}"
+
+
+def test_carpenter_real_drugs_kept():
+    from scripts.formulary.extract_carpenter import _clean_agent_name
+
+    keep = [
+        "Acepromazine",
+        "Alfaxalone",
+        "Acyclovir",
+        "Enrofloxacin",
+        "Meloxicam",
+        "Phenoxyethanol",
+        "2-phenoxyethanol",
+        "Amoxicillin",
+        "Midazolam",
+        "Ketamine",
+        "Malachite green",
+        "Hydrogen peroxide",
+        "Cefovecin (Convenia",
+        "Afoxolaner (A) + milbemycin",
+        "Imidacloprid 10% + moxidectin",
+        "Eugenol) (cont’d",
+    ]
+    for name in keep:
+        cleaned = _clean_agent_name(name)
+        expected = "Eugenol" if name.startswith("Eugenol)") else name
+        assert cleaned == expected, f"expected keep: {name!r} → {cleaned!r}"
+
+
+def test_carpenter_parse_tables_filters_junk():
+    from scripts.formulary.extract_carpenter import parse_tables
+
+    text = """
+CHAPTER 4 Reptiles
+TABLE 4-1 Antimicrobial Agents Used in Reptiles
+Agent                    Dosage                    Comments
+Acepromazine             0.1 mg/kg IM              African Grey / sedation
+Alfaxalone               5 mg/kg IV                anesthesia
+2nd-degree AV block      Long PR intervals         Anesthetics
+3rd-degree AV block      Escape ventricular rhythm Severe cardiomegaly
+Aerobic bacteria         Aminoglycoside with a penicillin
+A/G ratio                0.6–1.6                   lab value
+African Grey             45-53                     parrot values
+African Green            Common                    primate values
+A) + midazolam (Mi       1 mg/kg SC, IM            sedation
+alfaxalone (A            5 mg/kg SC                truncated
+acepromazine (A          0.5 mg/kg IM              truncated
+Acyclovir                80 mg/kg PO               herpes
+Enrofloxacin             10 mg/kg IM               gram-negative
+Meloxicam                0.2 mg/kg IM              NSAID
+Phenoxyethanol           0.1-0.5 mL/L              anesthesia
+"""
+    drugs = parse_tables(text)
+    names = {d["canonical_name_en"] for d in drugs}
+    for kept in (
+        "Acepromazine",
+        "Alfaxalone",
+        "Acyclovir",
+        "Enrofloxacin",
+        "Meloxicam",
+        "Phenoxyethanol",
+    ):
+        assert kept in names, names
+    ace = next(d for d in drugs if d["canonical_name_en"] == "Acepromazine")
+    assert any(x.get("species_note") == "African Grey" for x in ace["doses"])
+    for rejected in (
+        "2nd-degree AV block",
+        "3rd-degree AV block",
+        "Aerobic bacteria",
+        "A/G ratio",
+        "African Grey",
+        "African Green",
+        "A) + midazolam (Mi",
+        "alfaxalone (A",
+        "acepromazine (A",
+    ):
+        assert rejected not in names, names
+
+
+def test_carpenter_skips_non_drug_tables():
+    from scripts.formulary.extract_carpenter import parse_tables
+
+    text = """
+CHAPTER 5 Birds
+TABLE 5-19 Hematologic and Biochemical Values of Select Psittaciformes
+African Grey             45-53                     Measurement
+A/G ratio                0.6-1.6                   lab
+TABLE 5-51 Select Arrhythmias and Some Documented Causes in Birds
+2nd-degree AV block      Long PR intervals         Anesthetics
+TABLE 5-1 Antimicrobial Agents Used in Birds
+Enrofloxacin             10 mg/kg IM               infection
+Acepromazine             0.1 mg/kg IM              sedation
+"""
+    drugs = parse_tables(text)
+    names = {d["canonical_name_en"] for d in drugs}
+    assert names == {"Enrofloxacin", "Acepromazine"}

@@ -212,17 +212,256 @@ def _has_latin(value: str) -> bool:
     return bool(re.search(r"[A-Za-z]", value or ""))
 
 
-def _merge_drug(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
-    if not base.get("canonical_name_en") and incoming.get("canonical_name_en"):
-        base["canonical_name_en"] = incoming["canonical_name_en"]
-    if incoming.get("canonical_name_en") and _has_latin(incoming["canonical_name_en"]):
-        if not _has_latin(base.get("canonical_name_en", "")):
-            base["canonical_name_en"] = incoming["canonical_name_en"]
+# Explicit INN spelling variants only — do not fuzzy-merge (Aciclovir ≠ Famciclovir).
+INN_SPELLING_CANON = {
+    "aciclovir": "acyclovir",
+    "valaciclovir": "valacyclovir",
+    "acriflavin": "acriflavine",
+    "famcyclovir": "famciclovir",
+}
 
-    if incoming.get("canonical_name_ru") and (
-        incoming.get("source") == "manual" or not base.get("canonical_name_ru")
+_MIN_LOOKUP_KEY_LEN = 3
+
+_TRAILING_CONTINUATION_RE = re.compile(
+    r"(?:\s*\(\s*|\s+)(?:cont(?:inued)?['\u2018\u2019]?d?\.?|продолж(?:ение)?\.?)\s*\)?\s*$",
+    re.I,
+)
+_CLOSED_PAREN_RE = re.compile(r"^(?P<inn>.+?)\s*\(\s*(?P<inner>[^)]+?)\s*\)\s*$")
+_UNCLOSED_PAREN_RE = re.compile(r"^(?P<inn>.+?)\s*\(\s*(?P<inner>[^)]*?)\s*$")
+_CONTINUATION_INNER_RE = re.compile(
+    r"^(?:cont(?:inued)?['\u2018\u2019]?d?\.?|продолж(?:ение)?\.?)$",
+    re.I,
+)
+
+_QUALIFIER_ABBREV = frozenset(
+    {"sr", "xr", "pr", "mr", "la", "xl", "cr", "er", "ir", "dr", "hcl"}
+)
+_SALT_OR_FORM_WORDS = frozenset(
+    {
+        "hydrochloride",
+        "hydrobromide",
+        "maleate",
+        "acetate",
+        "sodium",
+        "potassium",
+        "phosphate",
+        "sulfate",
+        "sulphate",
+        "chloride",
+        "hydrate",
+        "mesylate",
+        "clavulanate",
+        "clavulanic",
+        "ophthalmic",
+        "topical",
+        "injectable",
+        "depot",
+        "compound",
+        "sustained",
+        "prolonged",
+        "modified",
+        "extended",
+        "controlled",
+        "delayed",
+        "immediate",
+        "release",
+        "acting",
+    }
+)
+
+
+def _spelling_canonical(norm: str) -> str:
+    return INN_SPELLING_CANON.get(norm, norm)
+
+
+def _is_page_crumb(inner: str) -> bool:
+    text = inner.strip(" .,-–—")
+    return (not text) or bool(re.fullmatch(r"[A-Za-zА-Яа-яЁё]", text))
+
+
+def _is_qualifier(inner: str) -> bool:
+    n = normalize_name(inner)
+    if not n:
+        return False
+    if n in _QUALIFIER_ABBREV:
+        return True
+    tokens = set(n.replace("-", " ").split())
+    if tokens & _SALT_OR_FORM_WORDS:
+        return True
+    if "release" in n or "acting" in n:
+        return True
+    return False
+
+
+def _looks_like_trade(inner: str) -> bool:
+    """True for Title-Case / Cyrillic trade names, not lowercase INN fragments."""
+    text = inner.strip()
+    if not text or len(text) < 3 or len(text) > 40:
+        return False
+    if _is_qualifier(text) or _CONTINUATION_INNER_RE.match(text):
+        return False
+    parts = [p.strip() for p in re.split(r"[,;/]", text) if p.strip()]
+    if not parts or len(parts) > 4:
+        return False
+    for part in parts:
+        if not re.search(r"[A-Za-zА-Яа-яЁё]", part):
+            return False
+        if re.fullmatch(r"[a-z][a-z0-9\-]+", part) and len(part) >= 5:
+            return False
+        if not (re.match(r"^[A-ZА-ЯЁ]", part) or re.search(r"[А-Яа-яЁё]", part)):
+            return False
+    return True
+
+
+def _strip_name_noise(name: str) -> str:
+    text = (name or "").strip()
+    prev = None
+    while text and prev != text:
+        prev = text
+        text = _TRAILING_CONTINUATION_RE.sub("", text).strip(" -–—,;")
+    return text
+
+
+def _split_inn_and_trade(name: str) -> tuple[str, str | None]:
+    """Split 'Enrofloxacin (Baytril)' → INN + trade; keep formulation variants intact."""
+    text = (name or "").strip()
+    if not text:
+        return "", None
+    m = _CLOSED_PAREN_RE.fullmatch(text) or _UNCLOSED_PAREN_RE.fullmatch(text)
+    if not m:
+        return text, None
+    inn = m.group("inn").strip(" -–—,")
+    inner = m.group("inner").strip(" -–—,.")
+    if not inn:
+        return text, None
+    if _CONTINUATION_INNER_RE.match(inner) or _is_page_crumb(inner):
+        return inn, None
+    if _is_qualifier(inner):
+        return text, None
+    if _looks_like_trade(inner):
+        return inn, inner
+    return text, None
+
+
+def inn_match_key(name: str) -> str:
+    """Normalized merge key: suffix-stripped INN with spelling variants applied."""
+    stripped = _strip_name_noise(name)
+    inn, _trade = _split_inn_and_trade(stripped)
+    return _spelling_canonical(normalize_name(inn or name or ""))
+
+
+def _display_inn(name: str) -> str:
+    stripped = _strip_name_noise(name)
+    inn, _trade = _split_inn_and_trade(stripped)
+    return (inn or stripped or name or "").strip()
+
+
+def _name_quality(name: str, *, prefer_latin: bool) -> tuple:
+    n = (name or "").strip()
+    inn = _display_inn(n)
+    return (
+        1 if (prefer_latin and _has_latin(n)) else 0,
+        0 if _TRAILING_CONTINUATION_RE.search(n) else 1,
+        0 if "(" in n else 1,
+        len(normalize_name(inn)),
+        -len(n),
+    )
+
+
+def _prefer_display_name(existing: str, new: str, *, prefer_latin: bool) -> str:
+    existing = (existing or "").strip()
+    new = (new or "").strip()
+    if not existing:
+        return _display_inn(new) or new
+    if not new:
+        return _display_inn(existing) or existing
+    existing_q = _name_quality(existing, prefer_latin=prefer_latin)
+    new_q = _name_quality(new, prefer_latin=prefer_latin)
+    winner = existing if existing_q >= new_q else new
+    return _display_inn(winner) or winner
+
+
+def _iter_trade_parts(trade: str) -> list[str]:
+    return [p.strip() for p in re.split(r"[,;/]", trade) if p.strip()]
+
+
+def _prepare_drug(drug: dict[str, Any]) -> dict[str, Any]:
+    """Clean continuation/crumbs, lift INN(trade) parentheticals into trade_names."""
+    out = dict(drug)
+    trades = list(drug.get("trade_names") or [])
+    aliases = list(drug.get("aliases") or [])
+    for field in ("canonical_name_en", "canonical_name_ru"):
+        raw = (out.get(field) or "").strip()
+        if not raw:
+            continue
+        stripped = _strip_name_noise(raw)
+        inn, trade = _split_inn_and_trade(stripped)
+        if raw != inn:
+            aliases.append(raw)
+        if inn and inn != raw:
+            aliases.append(inn)
+        if trade:
+            for part in _iter_trade_parts(trade):
+                trades.append(part)
+                aliases.append(part)
+        if inn:
+            out[field] = inn
+    out["trade_names"] = merge_unique(trades)
+    out["aliases"] = merge_unique(aliases)
+    return out
+
+
+def _keys_from_text(value: str) -> list[str]:
+    keys: list[str] = []
+    if not (value or "").strip():
+        return keys
+    stripped = _strip_name_noise(value)
+    inn, _trade = _split_inn_and_trade(stripped)
+    seen: set[str] = set()
+    for piece in (value, stripped, inn):
+        if not piece:
+            continue
+        for candidate in (normalize_name(piece), transliterate_ru(piece)):
+            if not candidate or len(candidate) < _MIN_LOOKUP_KEY_LEN:
+                continue
+            for mapped in (candidate, _spelling_canonical(candidate)):
+                if mapped and mapped not in seen:
+                    seen.add(mapped)
+                    keys.append(mapped)
+    return keys
+
+
+def _lookup_keys(drug: dict[str, Any]) -> list[str]:
+    seen: set[str] = set()
+    keys: list[str] = []
+    for value in (
+        drug.get("canonical_name_en"),
+        drug.get("canonical_name_ru"),
+        *(drug.get("aliases") or []),
+        *(drug.get("trade_names") or []),
     ):
-        base["canonical_name_ru"] = incoming["canonical_name_ru"]
+        for key in _keys_from_text(value or ""):
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+    return keys
+
+
+def _merge_drug(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    base["canonical_name_en"] = _prefer_display_name(
+        base.get("canonical_name_en") or "",
+        incoming.get("canonical_name_en") or "",
+        prefer_latin=True,
+    )
+
+    new_ru = (incoming.get("canonical_name_ru") or "").strip()
+    if new_ru:
+        if incoming.get("source") == "manual" or not (base.get("canonical_name_ru") or "").strip():
+            base["canonical_name_ru"] = _prefer_display_name(
+                base.get("canonical_name_ru") or "",
+                new_ru,
+                prefer_latin=False,
+            )
 
     base["trade_names"] = merge_unique(
         list(base.get("trade_names") or []) + list(incoming.get("trade_names") or [])
@@ -260,16 +499,16 @@ def _merge_drug(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any
 
 
 def _match_key(drug: dict[str, Any]) -> str:
+    """Primary merge key from cleaned INN — not trade names (Baytril ≠ a new drug)."""
     for candidate in (
         drug.get("canonical_name_en"),
         drug.get("canonical_name_ru"),
         *(drug.get("aliases") or []),
-        *(drug.get("trade_names") or []),
     ):
-        norm = normalize_name(candidate or "")
-        if norm and _has_latin(candidate or ""):
-            return norm
-    return normalize_name(drug.get("canonical_name_en") or drug.get("canonical_name_ru") or "")
+        key = inn_match_key(candidate or "")
+        if key:
+            return key
+    return inn_match_key(drug.get("canonical_name_en") or drug.get("canonical_name_ru") or "")
 
 
 def merge_sources(
@@ -277,32 +516,24 @@ def merge_sources(
     carpenter: list[dict[str, Any]],
     manual: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """BSAVA skeleton → Carpenter doses → manual RU fills."""
+    """BSAVA skeleton → Carpenter doses → manual RU fills. One INN → one card."""
     by_key: dict[str, dict[str, Any]] = {}
     alias_index: dict[str, str] = {}
 
     def resolve_key(drug: dict[str, Any]) -> str:
-        candidates = []
-        for c in (
-            drug.get("canonical_name_en"),
-            drug.get("canonical_name_ru"),
-            *(drug.get("aliases") or []),
-            *(drug.get("trade_names") or []),
-        ):
-            n = normalize_name(c or "")
-            if n:
-                candidates.append(n)
-                tr = transliterate_ru(c or "")
-                if tr:
-                    candidates.append(tr)
-        for c in candidates:
-            if c in alias_index:
-                return alias_index[c]
-        primary = _match_key(drug)
-        return primary
+        for candidate in _lookup_keys(drug):
+            if candidate in alias_index:
+                return alias_index[candidate]
+        return _match_key(drug)
+
+    def index_drug(key: str, merged: dict[str, Any]) -> None:
+        alias_index[key] = key
+        for mapped in _lookup_keys(merged):
+            alias_index[mapped] = key
 
     def ingest(rows: list[dict[str, Any]], priority_label: str) -> None:
-        for drug in rows:
+        for raw in rows:
+            drug = _prepare_drug(raw)
             key = resolve_key(drug)
             if not key:
                 continue
@@ -324,25 +555,12 @@ def merge_sources(
                     "full_text_ru": drug.get("full_text_ru") or "",
                     "doses": list(drug.get("doses") or []),
                     "sources": list(drug.get("sources") or [drug.get("source")]),
+                    "source": drug.get("source") or (drug.get("sources") or [""])[0],
                 }
             else:
                 _merge_drug(by_key[key], drug)
-            # refresh alias index
             merged = by_key[key]
-            for alias in merge_unique(
-                [
-                    merged.get("canonical_name_en", ""),
-                    merged.get("canonical_name_ru", ""),
-                    *(merged.get("aliases") or []),
-                    *(merged.get("trade_names") or []),
-                ]
-            ):
-                n = normalize_name(alias)
-                if n:
-                    alias_index[n] = key
-                tr = transliterate_ru(alias)
-                if tr:
-                    alias_index[tr] = key
+            index_drug(key, merged)
             logger.debug("Merged %s via %s → %s", drug.get("canonical_name_en"), priority_label, key)
 
     ingest(bsava, "bsava")

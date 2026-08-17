@@ -42,14 +42,77 @@ DOSE_START_RE = re.compile(
 
 _NON_DRUG_TABLE = (
     "hematologic",
+    "hematology",
     "serum biochemical",
+    "biochemical values",
     "physiologic",
     "blood collection",
     "differential diagnos",
     "disinfectant",
     "scientific names",
     "common captive",
+    "common names",
     "guidelines for treatment",
+    "blood gas",
+    "urinalysis",
+    "electrocardiog",
+    "arrhythmia",
+    "electrophoresis",
+    "lipoprotein",
+    "plasma protein",
+    "venipuncture",
+    "injection sites",
+    "reference values",
+    "arterial and venous",
+    "environmental, dietary",
+    "t4 values",
+    "bone marrow",
+)
+
+# OCR sometimes splits TABLE → "TA BL E 5-31"
+_TABLE_HEAD_RE = re.compile(r"^TA\s*BL\s*E\s+\d", re.I)
+
+_JUNK_TABLE_LINE = (
+    "Hematologic",
+    "Serum Biochemical",
+    "Electrocardiog",
+    "Protein Electrophoresis",
+    "Blood Gas",
+    "Urinalysis Values",
+)
+
+# Diagnoses, lab values, and physiology crumbs that are not drug names.
+_DIAGNOSIS_LAB_RE = re.compile(
+    r"(?i)\b("
+    r"block[a-d]?|ratio[a-d]?|bacteria|aerobic|anaerobic|"
+    r"hematologic|biochemical|"
+    r"\d+(?:st|nd|rd|th)[-\s]?degree"
+    r")\b"
+)
+
+# Truncated protocol abbreviations: "alfaxalone (A", "midazolam (Mi", "acepromazine (A"
+_INCOMPLETE_ABBREV_PAREN_RE = re.compile(r"\([A-Za-z]{1,2}(?:/[A-Za-z]{1,2})?$")
+
+# Species/common-name rows from hematology / taxa tables (agent column only).
+_SPECIES_ONLY_NAMES = {
+    "african green",
+    "african grey",
+    "african gray",
+    "african clawed frog",
+}
+_SPECIES_ONLY_RE = re.compile(
+    r"(?i)(^african\s+(?:green|grey|gray)\b|\bparrots?\b|\bspp\.?\b)"
+)
+# Keep names that look like chemicals even if a species token is present
+# (e.g. "malachite green" must not be banned just because of "green").
+_DRUG_LIKE_RE = re.compile(
+    r"(?i)("
+    r"cillin|mycin|cycline|floxacin|nazole|caine|olol|pril|sartan|"
+    r"statin|\bmab\b|\bnib\b|vir\b|faxalone|promazine|cyclovir|"
+    r"phenoxy|ethanol|oxicam|chloride|sulfate|oxide|peroxide|"
+    r"\bacid\b|\boil\b|vaccine|extract|hormone|steroid|"
+    r"antibiotic|antifungal|antiviral"
+    r")"
 )
 
 
@@ -100,8 +163,61 @@ def _chapter_taxa(line: str) -> str | None:
     return "other"
 
 
+def _is_protocol_fragment(name: str) -> bool:
+    """True for 'A) + midazolam' / 'K) + fentanyl' crumbs (closing paren before any open)."""
+    close = name.find(")")
+    if close == -1:
+        return False
+    open_ = name.find("(")
+    return open_ == -1 or close < open_
+
+
+def _is_species_only_name(name: str) -> bool:
+    """Reject animal common/scientific names used as the agent, not as species_note."""
+    if _DRUG_LIKE_RE.search(name):
+        return False
+    lowered = name.lower()
+    if lowered in _SPECIES_ONLY_NAMES:
+        return True
+    return bool(_SPECIES_ONLY_RE.search(lowered))
+
+
+def is_junk_agent_name(name: str) -> bool:
+    """True if the agent column is not a drug (diagnosis, lab, species, truncated protocol)."""
+    if not name:
+        return True
+    lowered = name.lower()
+    collapsed = re.sub(r"\s+", "", lowered)
+    if collapsed in {"contents", "table"} or re.match(r"^table\d", collapsed):
+        return True
+    if lowered in {
+        "agent",
+        "agent(s",
+        "agents",
+        "dosage",
+        "comments",
+        "species",
+        "measurement",
+        "measurements",
+        "injectable agents",
+        "inhaled agents",
+        "acceptable methods",
+        "normal values",
+    }:
+        return True
+    if _DIAGNOSIS_LAB_RE.search(name):
+        return True
+    if _INCOMPLETE_ABBREV_PAREN_RE.search(name):
+        return True
+    if _is_protocol_fragment(name):
+        return True
+    if _is_species_only_name(name):
+        return True
+    return False
+
+
 def _clean_agent_name(name: str) -> str:
-    name = re.sub(r"\s*\(cont'?d\.?\)?\s*$", "", name, flags=re.I)
+    name = re.sub(r"\s*\(cont[’']?d\.?\)?\s*$", "", name, flags=re.I)
     name = re.sub(r"\s+", " ", name).strip(" -–—)(,")
     if len(name) < 3 or len(name) > 60:
         return ""
@@ -112,6 +228,7 @@ def _clean_agent_name(name: str) -> str:
         "comments",
         "species",
         "measurement",
+        "measurements",
         "cont’d",
         "cont'd",
     }:
@@ -143,13 +260,15 @@ def _clean_agent_name(name: str) -> str:
         return ""
     if re.search(r"\btreatments?\d*\b", lowered):
         return ""
+    if is_junk_agent_name(name):
+        return ""
     return name
 
 
 def _split_agent_dose_comment(line: str) -> tuple[str, str, str] | None:
     if re.match(r"^Agent\s+Dosage", line, re.I):
         return None
-    if re.match(r"^TABLE\s+\d", line, re.I):
+    if _TABLE_HEAD_RE.match(line):
         return None
 
     parts = re.split(r"\s{2,}", line.strip())
@@ -206,7 +325,7 @@ def parse_tables(text: str) -> list[dict[str, Any]]:
             current_agent = ""
             in_table = False
             continue
-        if re.match(r"^TABLE\s+\d", stripped, re.I):
+        if _TABLE_HEAD_RE.match(stripped):
             low = stripped.lower()
             if any(x in low for x in _NON_DRUG_TABLE):
                 in_table = False
@@ -218,7 +337,7 @@ def parse_tables(text: str) -> list[dict[str, Any]]:
             in_table = True
         if not in_table:
             continue
-        if any(x in stripped for x in ("Hematologic", "Serum Biochemical")):
+        if any(x in stripped for x in _JUNK_TABLE_LINE):
             in_table = False
             continue
 
