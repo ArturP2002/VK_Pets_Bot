@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +14,11 @@ from rapidfuzz import fuzz, process
 
 import config
 from scripts.formulary.common import normalize_name, transliterate_ru
+from scripts.formulary.schema import ensure_schema_extensions
 
 logger = logging.getLogger(__name__)
+
+FOREIGN_SOURCES = frozenset({"bsava", "carpenter"})
 
 
 @dataclass
@@ -24,20 +29,21 @@ class DrugHit:
     matched_alias: str
     score: float
     sources: list[str] = field(default_factory=list)
+    is_exact: bool = False
 
     @property
     def display_name(self) -> str:
-        """Prefer RU name for the RU-only product surface."""
-        if self.canonical_name_ru and self.canonical_name_en:
-            return f"{self.canonical_name_ru} ({self.canonical_name_en})"
+        """RU-only label for buttons and cards."""
+        if self.matched_alias and _has_cyrillic(self.matched_alias):
+            return self.matched_alias
+        if self.canonical_name_ru and _has_cyrillic(self.canonical_name_ru):
+            return self.canonical_name_ru
         if self.canonical_name_ru:
             return self.canonical_name_ru
-        if self.matched_alias and self.matched_alias.lower() != (
-            self.canonical_name_en or ""
-        ).lower():
-            en = self.canonical_name_en or ""
-            return f"{self.matched_alias}" + (f" / {en}" if en else "")
-        return self.canonical_name_en or self.matched_alias or f"#{self.drug_id}"
+        tr = transliterate_ru(self.canonical_name_en or "")
+        if tr:
+            return tr
+        return f"Препарат #{self.drug_id}"
 
 
 @dataclass
@@ -61,6 +67,64 @@ class DrugRecord:
     aliases: list[str]
 
 
+def _has_cyrillic(value: str) -> bool:
+    return bool(re.search(r"[А-Яа-яЁё]", value or ""))
+
+
+def _pick_ru_alias(aliases: list[str]) -> str:
+    for alias in aliases:
+        if _has_cyrillic(alias):
+            return alias.strip()
+    return ""
+
+
+def _is_exact_alias_match(q_norm: str, q_tr: str, alias_norm: str) -> bool:
+    return bool(alias_norm and (alias_norm == q_norm or alias_norm == q_tr))
+
+
+def _is_exact_canonical_match(q_norm: str, q_tr: str, name_ru: str) -> bool:
+    ru_norm = normalize_name(name_ru or "")
+    return bool(ru_norm and (ru_norm == q_norm or ru_norm == q_tr))
+
+
+def _adjust_score_for_query_lang(
+    score: float,
+    *,
+    query_cyrillic: bool,
+    alias: str,
+    alias_lang: str,
+    name_ru: str,
+) -> float:
+    """Boost RU hits and penalize EN-only hits for Cyrillic queries."""
+    if not query_cyrillic:
+        return score
+    alias_cyrillic = _has_cyrillic(alias)
+    ru_cyrillic = _has_cyrillic(name_ru or "")
+    if alias_cyrillic or alias_lang == "ru" or ru_cyrillic:
+        return min(100.0, score + 15.0)
+    if alias_lang in ("en", "tr", "") and not ru_cyrillic:
+        return max(0.0, score - 15.0)
+    return score
+
+
+def _store_hit(best: dict[int, DrugHit], hit: DrugHit) -> None:
+    prev = best.get(hit.drug_id)
+    if prev is None:
+        best[hit.drug_id] = hit
+        return
+    if hit.is_exact and not prev.is_exact:
+        best[hit.drug_id] = hit
+        return
+    if prev.is_exact and not hit.is_exact:
+        return
+    if hit.score > prev.score:
+        best[hit.drug_id] = hit
+        return
+    if hit.score == prev.score and hit.is_exact and prev.is_exact:
+        if _has_cyrillic(hit.matched_alias) and not _has_cyrillic(prev.matched_alias):
+            best[hit.drug_id] = hit
+
+
 def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = Path(db_path or config.FORMULARY_DB)
     if not path.exists():
@@ -69,7 +133,149 @@ def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
         )
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
+    ensure_schema_extensions(conn)
     return conn
+
+
+def _read_name_cache(conn: sqlite3.Connection, drug_id: int) -> tuple[str, list[str]] | None:
+    try:
+        row = conn.execute(
+            "SELECT name_ru, aliases_json FROM drug_name_cache WHERE drug_id = ?",
+            (drug_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+    name_ru = (row["name_ru"] or "").strip()
+    if not name_ru:
+        return None
+    aliases_raw = json.loads(row["aliases_json"] or "[]")
+    aliases = [str(a).strip() for a in aliases_raw if str(a).strip()]
+    return name_ru, aliases
+
+
+def _write_name_cache(
+    conn: sqlite3.Connection,
+    drug_id: int,
+    name_ru: str,
+    aliases: list[str],
+    *,
+    source: str = "ai",
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO drug_name_cache
+            (drug_id, name_ru, aliases_json, source, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (drug_id, name_ru, json.dumps(aliases, ensure_ascii=False), source, now),
+    )
+    conn.commit()
+
+
+def _persist_runtime_aliases(
+    conn: sqlite3.Connection,
+    drug_id: int,
+    name_ru: str,
+    aliases: list[str],
+) -> None:
+    """Add RU aliases + FTS rows so translated names become searchable."""
+    display = name_ru
+    candidates = [name_ru, *aliases]
+    seen: set[str] = set()
+    for alias in candidates:
+        cleaned = (alias or "").strip()
+        norm = normalize_name(cleaned)
+        if not cleaned or not norm or norm in seen:
+            continue
+        seen.add(norm)
+        lang = "ru" if _has_cyrillic(cleaned) else "en"
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO drug_aliases(drug_id, alias, alias_norm, lang)
+            VALUES (?, ?, ?, ?)
+            """,
+            (drug_id, cleaned, norm, lang),
+        )
+        if cur.rowcount:
+            alias_id = cur.lastrowid
+            conn.execute(
+                "INSERT OR IGNORE INTO drugs_fts(rowid, alias_norm, display_name) VALUES (?, ?, ?)",
+                (alias_id, norm, display),
+            )
+    conn.commit()
+
+
+def resolve_display_name_ru(
+    drug: DrugRecord | DrugHit,
+    *,
+    db_path: str | Path | None = None,
+    use_llm: bool = True,
+) -> str:
+    """
+    Resolve a Russian display name: DB field → cache → optional LLM → transliteration.
+    Persists runtime translations to drug_name_cache and drug_aliases.
+    """
+    drug_id = drug.id if isinstance(drug, DrugRecord) else drug.drug_id
+    name_ru = (drug.canonical_name_ru or "").strip()
+    if name_ru and _has_cyrillic(name_ru):
+        return name_ru
+
+    aliases = drug.aliases if isinstance(drug, DrugRecord) else []
+    alias_ru = _pick_ru_alias(aliases)
+    if alias_ru:
+        return alias_ru
+
+    sources = drug.sources if isinstance(drug, DrugRecord) else (drug.sources or [])
+    name_en = drug.canonical_name_en or ""
+
+    conn = _connect(db_path)
+    try:
+        cached = _read_name_cache(conn, drug_id)
+        if cached:
+            cached_name, _cached_aliases = cached
+            if cached_name:
+                return cached_name
+
+        foreign = bool({str(s).lower() for s in sources} & FOREIGN_SOURCES)
+        if use_llm and foreign and name_en and not _has_cyrillic(name_en):
+            try:
+                from services import llm_client
+
+                if llm_client.is_configured():
+                    payload = {
+                        "canonical_name_en": name_en,
+                        "action": drug.action if isinstance(drug, DrugRecord) else "",
+                        "formulations": drug.formulations if isinstance(drug, DrugRecord) else "",
+                        "sources": list(sources),
+                    }
+                    results = llm_client.translate_drug_names([payload])
+                    if results:
+                        translated = (results[0].get("canonical_name_ru") or "").strip()
+                        extra = [
+                            str(a).strip()
+                            for a in (results[0].get("search_aliases") or [])
+                            if str(a).strip()
+                        ]
+                        if translated:
+                            _write_name_cache(conn, drug_id, translated, extra, source="ai")
+                            _persist_runtime_aliases(conn, drug_id, translated, extra)
+                            if isinstance(drug, DrugRecord):
+                                drug.canonical_name_ru = translated
+                            elif isinstance(drug, DrugHit):
+                                drug.canonical_name_ru = translated
+                            return translated
+            except Exception as exc:
+                logger.warning("Runtime drug name translation failed for #%s: %s", drug_id, exc)
+
+        tr = transliterate_ru(name_en)
+        if tr:
+            return tr
+        return f"Препарат #{drug_id}"
+    finally:
+        conn.close()
 
 
 def get_drug(drug_id: int, db_path: str | Path | None = None) -> DrugRecord | None:
@@ -92,7 +298,7 @@ def get_drug(drug_id: int, db_path: str | Path | None = None) -> DrugRecord | No
                 (drug_id,),
             ).fetchall()
         ]
-        return DrugRecord(
+        record = DrugRecord(
             id=row["id"],
             canonical_name_en=row["canonical_name_en"],
             canonical_name_ru=row["canonical_name_ru"],
@@ -111,6 +317,9 @@ def get_drug(drug_id: int, db_path: str | Path | None = None) -> DrugRecord | No
             doses=doses,
             aliases=aliases,
         )
+        if not _has_cyrillic(record.canonical_name_ru or ""):
+            record.canonical_name_ru = resolve_display_name_ru(record, db_path=db_path)
+        return record
     finally:
         conn.close()
 
@@ -138,20 +347,23 @@ def _fts_candidates(conn: sqlite3.Connection, query: str, limit: int) -> list[sq
         return []
 
 
-def _load_alias_corpus(conn: sqlite3.Connection) -> list[tuple[int, str, str, str, str, str]]:
-    """(drug_id, alias, alias_norm, name_en, name_ru, sources_json)."""
+def _load_alias_corpus(
+    conn: sqlite3.Connection,
+) -> list[tuple[int, str, str, str, str, str, str]]:
+    """(drug_id, alias, alias_norm, lang, name_en, name_ru, sources_json)."""
     return [
         (
             r["drug_id"],
             r["alias"],
             r["alias_norm"],
+            r["lang"],
             r["canonical_name_en"],
             r["canonical_name_ru"],
             r["sources"],
         )
         for r in conn.execute(
             """
-            SELECT a.drug_id, a.alias, a.alias_norm,
+            SELECT a.drug_id, a.alias, a.alias_norm, a.lang,
                    d.canonical_name_en, d.canonical_name_ru, d.sources
             FROM drug_aliases a
             JOIN drugs d ON d.id = a.drug_id
@@ -179,6 +391,7 @@ def search_drugs(
     )
     q_norm = normalize_name(q)
     q_tr = transliterate_ru(q)
+    query_cyrillic = _has_cyrillic(q)
 
     conn = _connect(db_path)
     try:
@@ -186,17 +399,32 @@ def search_drugs(
         if not corpus:
             return []
 
-        # Exact / substring prefilter
-        exact_ids: dict[int, tuple[float, str]] = {}
-        for drug_id, alias, alias_norm, *_rest in corpus:
-            if alias_norm == q_norm or alias_norm == q_tr:
-                exact_ids[drug_id] = (100.0, alias)
+        # Exact / substring prefilter (alias_norm + canonical_name_ru)
+        exact_ids: dict[int, tuple[float, str, bool]] = {}
+        for drug_id, alias, alias_norm, lang, name_en, name_ru, _sources in corpus:
+            if _is_exact_alias_match(q_norm, q_tr, alias_norm):
+                prev = exact_ids.get(drug_id)
+                if prev is None or (
+                    _has_cyrillic(alias) and not _has_cyrillic(prev[1])
+                ):
+                    exact_ids[drug_id] = (100.0, alias, True)
             elif q_norm and (q_norm in alias_norm or alias_norm in q_norm):
-                exact_ids.setdefault(drug_id, (92.0, alias))
+                exact_ids.setdefault(drug_id, (92.0, alias, False))
+
+        for row in conn.execute(
+            "SELECT id, canonical_name_ru FROM drugs WHERE canonical_name_ru != ''"
+        ):
+            name_ru = row["canonical_name_ru"]
+            if _is_exact_canonical_match(q_norm, q_tr, name_ru):
+                prev = exact_ids.get(row["id"])
+                if prev is None or (
+                    _has_cyrillic(name_ru) and not _has_cyrillic(prev[1])
+                ):
+                    exact_ids[row["id"]] = (100.0, name_ru, True)
 
         fts_rows = _fts_candidates(conn, q, limit=50)
         for row in fts_rows:
-            exact_ids.setdefault(row["drug_id"], (88.0, row["alias"]))
+            exact_ids.setdefault(row["drug_id"], (88.0, row["alias"], False))
 
         # RapidFuzz over alias_norm
         choices = {i: row[2] for i, row in enumerate(corpus)}
@@ -217,36 +445,61 @@ def search_drugs(
 
         best: dict[int, DrugHit] = {}
 
-        def consider(drug_id: int, score: float, alias: str, meta_idx: int | None = None) -> None:
-            if score < threshold:
-                return
+        def consider(
+            drug_id: int,
+            score: float,
+            alias: str,
+            meta_idx: int | None = None,
+            *,
+            is_exact: bool = False,
+        ) -> None:
             if meta_idx is not None:
-                _, _, _, name_en, name_ru, sources_json = corpus[meta_idx]
+                _, _, _, lang, name_en, name_ru, sources_json = corpus[meta_idx]
             else:
                 row = next((c for c in corpus if c[0] == drug_id), None)
                 if not row:
                     return
-                _, _, _, name_en, name_ru, sources_json = row
+                _, _, _, lang, name_en, name_ru, sources_json = row
+            score = _adjust_score_for_query_lang(
+                float(score),
+                query_cyrillic=query_cyrillic,
+                alias=alias,
+                alias_lang=lang or "",
+                name_ru=name_ru or "",
+            )
+            if score < threshold:
+                return
             hit = DrugHit(
                 drug_id=drug_id,
                 canonical_name_en=name_en,
                 canonical_name_ru=name_ru,
                 matched_alias=alias,
-                score=float(score),
+                score=score,
                 sources=json.loads(sources_json or "[]"),
+                is_exact=is_exact,
             )
-            prev = best.get(drug_id)
-            if not prev or hit.score > prev.score:
-                best[drug_id] = hit
+            _store_hit(best, hit)
 
-        for drug_id, (score, alias) in exact_ids.items():
-            consider(drug_id, score, alias)
+        for drug_id, (score, alias, is_exact) in exact_ids.items():
+            consider(drug_id, score, alias, is_exact=is_exact)
 
         for alias_norm, score, idx in fuzzy:
-            drug_id, alias, *_ = corpus[idx]
-            consider(drug_id, float(score), alias, meta_idx=idx)
+            drug_id, alias, norm, lang, name_en, name_ru, _sources = corpus[idx]
+            fuzzy_exact = _is_exact_alias_match(q_norm, q_tr, norm)
+            consider(
+                drug_id,
+                float(score),
+                alias,
+                meta_idx=idx,
+                is_exact=fuzzy_exact,
+            )
 
         hits = sorted(best.values(), key=lambda h: (-h.score, h.display_name.lower()))
+        for hit in hits[:limit]:
+            if not _has_cyrillic(hit.canonical_name_ru or ""):
+                hit.canonical_name_ru = resolve_display_name_ru(
+                    hit, db_path=db_path, use_llm=False
+                )
         return hits[:limit]
     finally:
         conn.close()
@@ -311,12 +564,12 @@ def format_brief_ru(drug: DrugRecord, *, max_doses: int = 35) -> str:
     User-facing card summary in Russian (no LLM).
     Empty EN monograph fields are omitted; doses are always listed with RU labels.
     """
-    title = drug.canonical_name_ru or drug.canonical_name_en or f"#{drug.id}"
+    title = (
+        drug.canonical_name_ru
+        if _has_cyrillic(drug.canonical_name_ru or "")
+        else resolve_display_name_ru(drug, use_llm=False)
+    )
     lines: list[str] = [f"💊 {title}"]
-    if drug.canonical_name_ru and drug.canonical_name_en:
-        lines.append(f"Международное название: {drug.canonical_name_en}")
-    elif drug.canonical_name_en and not drug.canonical_name_ru:
-        lines.append(f"Название (EN): {drug.canonical_name_en}")
     if drug.trade_names:
         lines.append(f"Торговые названия: {', '.join(drug.trade_names)}")
     if drug.sources:

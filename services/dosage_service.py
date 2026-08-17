@@ -26,6 +26,21 @@ def search(query: str, *, limit: int = 5) -> list[formulary_search.DrugHit]:
     return formulary_search.search_drugs(query, limit=limit)
 
 
+def pick_search_hits(hits: list[formulary_search.DrugHit]) -> list[formulary_search.DrugHit]:
+    """
+    Collapse search results for UI: one exact hit → single card;
+    several exact hits → show only those; otherwise keep fuzzy list.
+    """
+    if not hits:
+        return hits
+    exact = [h for h in hits if h.is_exact]
+    if len(exact) == 1:
+        return exact
+    if len(exact) > 1:
+        return exact
+    return hits
+
+
 def deliver_brief(
     user: User,
     drug_id: int,

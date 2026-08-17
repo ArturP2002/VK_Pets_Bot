@@ -78,12 +78,36 @@ CREATE VIRTUAL TABLE IF NOT EXISTS drugs_fts USING fts5(
     content='',
     tokenize='unicode61 remove_diacritics 2'
 );
+
+CREATE TABLE IF NOT EXISTS drug_name_cache (
+    drug_id INTEGER PRIMARY KEY REFERENCES drugs(id) ON DELETE CASCADE,
+    name_ru TEXT NOT NULL,
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    source TEXT NOT NULL DEFAULT 'ai',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
 def init_schema(conn) -> None:
     conn.executescript(SCHEMA_SQL)
     conn.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '1')"
+        "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '2')"
+    )
+    conn.commit()
+
+
+def ensure_schema_extensions(conn) -> None:
+    """Apply additive schema changes to existing formulary.db files."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS drug_name_cache (
+            drug_id INTEGER PRIMARY KEY REFERENCES drugs(id) ON DELETE CASCADE,
+            name_ru TEXT NOT NULL,
+            aliases_json TEXT NOT NULL DEFAULT '[]',
+            source TEXT NOT NULL DEFAULT 'ai',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """
     )
     conn.commit()

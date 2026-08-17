@@ -27,6 +27,161 @@ from scripts.formulary.schema import init_schema
 
 logger = logging.getLogger(__name__)
 
+TRANSLATION_BATCH_SIZE = 25
+FOREIGN_SOURCES = frozenset({"bsava", "carpenter"})
+TRANSLATION_CACHE_FILENAME = "name_translations.jsonl"
+
+
+def _has_cyrillic(value: str) -> bool:
+    return bool(re.search(r"[А-Яа-яЁё]", value or ""))
+
+
+def _translation_cache_path() -> Path:
+    return raw_dir() / TRANSLATION_CACHE_FILENAME
+
+
+def load_name_translation_cache() -> dict[str, dict[str, Any]]:
+    """Key: normalized canonical_name_en → {canonical_name_ru, search_aliases, ...}."""
+    cache: dict[str, dict[str, Any]] = {}
+    for row in read_jsonl(_translation_cache_path()):
+        en = (row.get("canonical_name_en") or "").strip()
+        key = normalize_name(en)
+        if key and row.get("canonical_name_ru"):
+            cache[key] = row
+    return cache
+
+
+def save_name_translation_cache(entries: dict[str, dict[str, Any]]) -> None:
+    path = _translation_cache_path()
+    write_jsonl(path, entries.values())
+
+
+def drug_needs_ai_translation(drug: dict[str, Any]) -> bool:
+    if (drug.get("canonical_name_ru") or "").strip():
+        return False
+    sources = {str(s).lower() for s in (drug.get("sources") or [])}
+    if not sources & FOREIGN_SOURCES:
+        return False
+    en = (drug.get("canonical_name_en") or "").strip()
+    return bool(en) and not _has_cyrillic(en)
+
+
+def apply_translation_to_drug(
+    drug: dict[str, Any],
+    translation: dict[str, Any],
+    *,
+    source: str = "ai",
+) -> bool:
+    """Apply RU name + aliases; never overwrite existing manual canonical_name_ru."""
+    if (drug.get("canonical_name_ru") or "").strip():
+        return False
+    name_ru = (translation.get("canonical_name_ru") or "").strip()
+    if not name_ru:
+        return False
+    drug["canonical_name_ru"] = name_ru
+    aliases = list(drug.get("aliases") or [])
+    for alias in translation.get("search_aliases") or []:
+        cleaned = (alias or "").strip()
+        if cleaned and cleaned not in aliases:
+            aliases.append(cleaned)
+    if name_ru not in aliases:
+        aliases.append(name_ru)
+    drug["aliases"] = merge_unique(aliases)
+    drug["_name_translation"] = {
+        "name_ru": name_ru,
+        "aliases": list(translation.get("search_aliases") or []),
+        "source": source,
+    }
+    return True
+
+
+def translate_drug_names_batch(
+    drugs: list[dict[str, Any]],
+    *,
+    cache: dict[str, dict[str, Any]] | None = None,
+    use_llm: bool = True,
+) -> dict[str, dict[str, Any]]:
+    """
+    Fill canonical_name_ru for BSAVA/Carpenter drugs without RU names.
+    Updates cache dict in place and returns it.
+    """
+    cache = cache if cache is not None else load_name_translation_cache()
+    pending = [d for d in drugs if drug_needs_ai_translation(d)]
+    if not pending:
+        return cache
+
+    for drug in pending:
+        key = normalize_name(drug.get("canonical_name_en") or "")
+        if key and key in cache:
+            apply_translation_to_drug(drug, cache[key], source=cache[key].get("source", "cache"))
+
+    still_pending = [d for d in pending if not (d.get("canonical_name_ru") or "").strip()]
+    if not still_pending:
+        return cache
+
+    if not use_llm:
+        for drug in still_pending:
+            en = drug.get("canonical_name_en") or ""
+            tr = transliterate_ru(en)
+            if tr:
+                apply_translation_to_drug(
+                    drug,
+                    {"canonical_name_ru": tr.capitalize() if tr.islower() else tr, "search_aliases": []},
+                    source="translit",
+                )
+        return cache
+
+    try:
+        from services import llm_client
+    except ImportError:
+        llm_client = None  # type: ignore[assignment]
+
+    if not llm_client or not llm_client.is_configured():
+        logger.warning(
+            "ANTHROPIC_API_KEY not set; skipping AI drug name translation "
+            "(%s drugs will use transliteration fallback)",
+            len(still_pending),
+        )
+        return translate_drug_names_batch(drugs, cache=cache, use_llm=False)
+
+    for i in range(0, len(still_pending), TRANSLATION_BATCH_SIZE):
+        batch = still_pending[i : i + TRANSLATION_BATCH_SIZE]
+        try:
+            results = llm_client.translate_drug_names(batch)
+        except Exception as exc:
+            logger.warning("AI name translation batch failed: %s", exc)
+            for drug in batch:
+                en = drug.get("canonical_name_en") or ""
+                tr = transliterate_ru(en)
+                if tr:
+                    apply_translation_to_drug(
+                        drug,
+                        {
+                            "canonical_name_ru": tr.capitalize() if tr.islower() else tr,
+                            "search_aliases": [],
+                        },
+                        source="translit",
+                    )
+            continue
+
+        for drug, result in zip(batch, results):
+            key = normalize_name(drug.get("canonical_name_en") or "")
+            if not key:
+                continue
+            entry = {
+                "canonical_name_en": drug.get("canonical_name_en") or "",
+                "canonical_name_ru": result.get("canonical_name_ru") or "",
+                "search_aliases": list(result.get("search_aliases") or []),
+                "source": "ai",
+            }
+            if entry["canonical_name_ru"]:
+                cache[key] = entry
+                apply_translation_to_drug(drug, entry, source="ai")
+
+    save_name_translation_cache(cache)
+    return cache
+
+
 SECTION_CHUNK_FIELDS = (
     ("formulations", "formulations"),
     ("action", "action"),
@@ -263,6 +418,23 @@ def write_sqlite(drugs: list[dict[str, Any]], db_path: Path) -> dict[str, int]:
         drug_count += 1
         drug["_id"] = drug_id
 
+        translation_meta = drug.get("_name_translation")
+        if translation_meta and translation_meta.get("name_ru"):
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO drug_name_cache
+                    (drug_id, name_ru, aliases_json, source, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    drug_id,
+                    translation_meta["name_ru"],
+                    json.dumps(translation_meta.get("aliases") or [], ensure_ascii=False),
+                    translation_meta.get("source") or "ai",
+                    now,
+                ),
+            )
+
         for alias, alias_norm, lang in _alias_rows(drug):
             cur = conn.execute(
                 """
@@ -463,6 +635,7 @@ def build(
         write_jsonl(raw / "manual_ru.jsonl", manual)
 
     merged = merge_sources(bsava, carpenter, manual)
+    translate_drug_names_batch(merged)
     stats = write_sqlite(merged, db_path)
     stats["chunks"] = 0 if skip_chroma else build_chroma(merged, chroma_dir)
     stats["merged"] = len(merged)

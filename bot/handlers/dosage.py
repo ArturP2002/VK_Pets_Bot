@@ -111,7 +111,7 @@ def _handle_query(peer_id: int, user, query: str):
         session.clear_state(user.vk_id)
         return
 
-    hits = dosage_service.search(query)
+    hits = dosage_service.pick_search_hits(dosage_service.search(query))
     if not hits:
         can_ai = dosage_access.can_ask_ai(user)
         session.set_state(
@@ -130,21 +130,21 @@ def _handle_query(peer_id: int, user, query: str):
         vk.send_message(peer_id, msg, keyboards.dosage_miss_keyboard(can_ask_ai=can_ai))
         return
 
-    if len(hits) > 1:
-        session.set_state(
-            user.vk_id,
-            states.DOSAGE_PICK,
-            {"last_query": query, "candidates": [h.drug_id for h in hits]},
-        )
-        labels = "\n".join(f"• {h.display_name}" for h in hits)
-        vk.send_message(
-            peer_id,
-            f"Найдено несколько вариантов:\n{labels}\n\nВыберите препарат:",
-            keyboards.dosage_candidates_keyboard(hits),
-        )
+    if len(hits) == 1:
+        _deliver_hit(peer_id, user, hits[0].drug_id, query, access.apply_delay)
         return
 
-    _deliver_hit(peer_id, user, hits[0].drug_id, query, access.apply_delay)
+    session.set_state(
+        user.vk_id,
+        states.DOSAGE_PICK,
+        {"last_query": query, "candidates": [h.drug_id for h in hits]},
+    )
+    labels = "\n".join(f"• {h.display_name}" for h in hits)
+    vk.send_message(
+        peer_id,
+        f"Найдено несколько вариантов:\n{labels}\n\nВыберите препарат:",
+        keyboards.dosage_candidates_keyboard(hits),
+    )
 
 
 def _deliver_hit(peer_id: int, user, drug_id: int, query: str, apply_delay: bool):
