@@ -60,6 +60,17 @@ bash scripts/backup.sh
 
 Nginx проксирует HTTPS на `WEBHOOK_PORT` для `/webhook/tbank`.
 
+После правок справочника на сервере (`/opt/exocare`):
+
+1. Бэкап `data/formulary.db`, `data/chroma_formulary/` и основной sqlite (`bash scripts/backup.sh`).
+2. `git pull` нужной ветки. Файл `.env` не затирать.
+3. `source .venv/bin/activate && pip install -r requirements.txt`
+4. PDF/docx должны лежать в `knowledge_base/` (они не в git). Для перевода имён нужен ключ LLM в `.env`.
+5. Пересобрать справочник: `python -m scripts.formulary` (или скопировать уже собранные `data/formulary.db` и `data/chroma_formulary/`).
+6. `python -m scripts.formulary validate`
+7. `sudo systemctl restart exocare-bot` (webhook — только если менялся платёжный код).
+8. Проверка: `systemctl status exocare-bot` и `journalctl -u exocare-bot -n 100 --no-pager`.
+
 ## Структура
 
 ```

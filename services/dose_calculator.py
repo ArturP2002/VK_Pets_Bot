@@ -1,6 +1,7 @@
 """Deterministic dose arithmetic — LLM never computes the dose."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,7 +24,10 @@ PHYSICAL_TABLET_MIN = 0.25
 # Max water volume for tablet dissolution (ml).
 DISSOLUTION_V_MAX_ML = 10.0
 
-# Safety margin applied to dissolution volume (10–15 % → use 12.5 %).
+PREFERRED_DISSOLVE_ML = (0.5, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0)
+PREFERRED_DRAW_ML = (0.1, 0.2, 0.25, 0.5, 1.0, 2.0)
+
+# Safety margin applied only as a last-resort shrink of a non-round volume.
 DISSOLUTION_VOLUME_MARGIN = 0.875
 
 
@@ -170,7 +174,7 @@ def compute_dissolution(
     """
     Pick tablet fraction f, dissolution volume V and draw volume v.
 
-    V = (v_max × f × S) / D  (≤ 10 ml); v = D × V / (f × S).
+    Prefer round syringe-friendly volumes over saturating v_max.
     Returns (f, V, v) or None when dissolution cannot meet v_max.
     """
     d = float(total_mg)
@@ -178,25 +182,41 @@ def compute_dissolution(
     if d <= 0 or s <= 0 or v_max <= 0:
         return None
 
+    candidates: list[tuple[tuple, float, float, float]] = []
+    for f in (1.0, 0.5, 0.25):
+        for volume in PREFERRED_DISSOLVE_ML:
+            if volume > DISSOLUTION_V_MAX_ML:
+                continue
+            draw = d * volume / (f * s)
+            if draw <= 0 or draw > v_max + 1e-9:
+                continue
+            draw_round = min(abs(draw - p) for p in PREFERRED_DRAW_ML)
+            on_limit = draw > v_max * 0.9
+            nice_v = 0 if volume in (1.0, 2.0, 5.0, 10.0) else 1
+            # Prefer whole tablet, round draw, not sitting on syringe limit, nicer V.
+            rank = (0 if f == 1.0 else 1, 0 if draw_round <= 0.03 else 1, int(on_limit), nice_v, -volume)
+            candidates.append((rank, f, volume, draw))
+
+    if candidates:
+        _rank, f, volume, draw = min(candidates, key=lambda x: x[0])
+        return f, volume, draw
+
     for f in (1.0, 0.5, 0.25):
         v_raw = (v_max * f * s) / d
         if v_raw > DISSOLUTION_V_MAX_ML:
             continue
-        v_dissolve = apply_dissolution_volume_margin(v_raw)
-        if v_dissolve <= 0:
-            v_dissolve = round_convenient_ml(v_raw * 0.9)
+        v_dissolve = round_convenient_ml(v_raw)
         draw = d * v_dissolve / (f * s)
-        if draw <= v_max + 1e-9:
+        if 0 < draw <= v_max + 1e-9:
             return f, v_dissolve, draw
 
     f = 1.0
     draw_at_cap = d * DISSOLUTION_V_MAX_ML / (f * s)
     if draw_at_cap <= v_max + 1e-9:
-        v_dissolve = apply_dissolution_volume_margin(DISSOLUTION_V_MAX_ML)
+        v_dissolve = round_convenient_ml(DISSOLUTION_V_MAX_ML)
         draw = d * v_dissolve / (f * s)
         if draw <= v_max + 1e-9:
             return f, v_dissolve, draw
-
     return None
 
 
@@ -223,7 +243,7 @@ def check_minmax(
             f"({dose_max:g} мг/кг)."
         )
     if dose_min is not None and dose_max is not None:
-        return f"Доза в пределах справочника ({dose_min:g}–{dose_max:g} мг/кг)."
+        return ""
     return ""
 
 
@@ -436,6 +456,50 @@ def calculate(
     )
 
 
+SPECIES_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"guinea pig", "guinea pigs", "cavia", "морская свинка", "свинка", "свинк"}),
+    frozenset({"rabbit", "rabbits", "кролик", "кролика"}),
+    frozenset({"hamster", "hamsters", "хомяк", "хомяка"}),
+    frozenset({"chinchilla", "chinchillas", "шиншилла"}),
+    frozenset({"ferret", "ferrets", "хорек", "хорёк", "хорёк"}),
+    frozenset({"rat", "rats", "крыса", "крыс"}),
+    frozenset({"mouse", "mice", "мышь", "мыш"}),
+    frozenset({"parrot", "parrots", "попугай", "попуга"}),
+    frozenset({"shrimp", "shrimps", "креветка", "креветк", "pacific white shrimp"}),
+    frozenset({"crab", "crabs", "краб", "swimming crab"}),
+)
+
+_MOST_SPECIES_RE = re.compile(
+    r"(?i)\b(most\s+species|all\s+species|most|многие\s+виды|большинство)\b"
+)
+
+
+def _norm_species(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower().replace("ё", "е"))
+
+
+def _species_group(text: str) -> frozenset[str] | None:
+    blob = _norm_species(text)
+    if not blob:
+        return None
+    for group in SPECIES_GROUPS:
+        if any(alias in blob for alias in group):
+            return group
+    return None
+
+
+def _species_note_matches(user_species: str, note: str) -> bool:
+    user = _norm_species(user_species)
+    note_n = _norm_species(note)
+    if not user or not note_n:
+        return False
+    if user in note_n or note_n in user:
+        return True
+    g_user = _species_group(user)
+    g_note = _species_group(note_n)
+    return bool(g_user and g_note and g_user is g_note)
+
+
 def resolve_dose_from_rows(
     doses: list[dict[str, Any]],
     species: str | None = None,
@@ -443,14 +507,15 @@ def resolve_dose_from_rows(
     """
     Pick dose_min/max from formulary rows; return (mid, min, max, matched_row).
     Mid is used only when the user did not provide мг/кг.
+    Prefer the animal species over 'most species' and over a mismatched taxon.
     """
     if not doses:
         return None, None, None, None
 
-    species_l = (species or "").strip().lower()
+    species_l = _norm_species(species or "")
     taxa_hints = _species_to_taxa(species_l)
 
-    scored: list[tuple[int, dict[str, Any]]] = []
+    scored: list[tuple[tuple, dict[str, Any]]] = []
     for row in doses:
         if row.get("dose_min") is None and row.get("dose_max") is None:
             continue
@@ -458,26 +523,55 @@ def resolve_dose_from_rows(
         if unit and "mg/kg" not in unit and "мг/кг" not in unit:
             if unit not in ("", "mg/kg", "мг/кг"):
                 continue
-        score = 0
         taxa = (row.get("taxa") or "").lower()
-        note = (row.get("species_note") or "").lower()
-        if species_l and species_l in note:
-            score += 3
-        if taxa and taxa in taxa_hints:
-            score += 2
-        if taxa_hints and taxa in taxa_hints:
-            score += 1
-        scored.append((score, row))
+        note = row.get("species_note") or ""
+        source = (row.get("source") or "").lower()
+        species_hit = bool(species_l and _species_note_matches(species_l, note))
+        most = bool(_MOST_SPECIES_RE.search(note or "") or not (note or "").strip())
+        taxa_hit = bool(taxa and taxa in taxa_hints)
+        taxa_mismatch = bool(taxa_hints and taxa and taxa not in taxa_hints and taxa != "other")
 
-    if not scored:
+        score = 0
+        if species_hit:
+            score += 10
+        elif most and taxa_hit:
+            score += 5
+        elif taxa_hit:
+            score += 3
+        if taxa_mismatch and not species_hit:
+            score -= 8
+        if source in {"carpenter", "bsava"} and (species_hit or taxa_hit):
+            score += 2
+        if source == "manual" and not species_hit:
+            score -= 2
+        span = 0.0
+        try:
+            if row.get("dose_min") is not None and row.get("dose_max") is not None:
+                span = abs(float(row["dose_max"]) - float(row["dose_min"]))
+        except (TypeError, ValueError):
+            span = 0.0
+        scored.append(
+            (
+                (score, int(species_hit), int(bool(most and taxa_hit)), span, int(source in {"carpenter", "bsava"})),
+                row,
+            )
+        )
+
+    usable = [item for item in scored if item[0][0] > 0]
+    if species_l and taxa_hints and usable:
+        scored = usable
+    elif not scored:
         for row in doses:
             if row.get("dose_min") is not None or row.get("dose_max") is not None:
-                scored.append((0, row))
+                scored.append(((0, 0, 0), row))
                 break
     if not scored:
         return None, None, None, None
 
-    scored.sort(key=lambda x: -x[0])
+    scored.sort(key=lambda x: x[0], reverse=True)
+    if species_l and scored[0][0][0] <= 0:
+        return None, None, None, None
+
     best = scored[0][1]
     dmin = best.get("dose_min")
     dmax = best.get("dose_max")

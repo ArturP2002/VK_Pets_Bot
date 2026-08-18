@@ -8,6 +8,7 @@ from typing import Any
 
 import config
 from models import User
+from scripts.formulary.common import fold_match_key
 from scripts.formulary.junk_names import is_junk_drug_name
 from services import dosage_access, formulary_rag, formulary_search, llm_client
 
@@ -30,7 +31,7 @@ def search(query: str, *, limit: int = 5) -> list[formulary_search.DrugHit]:
 def pick_search_hits(hits: list[formulary_search.DrugHit]) -> list[formulary_search.DrugHit]:
     """
     Collapse search results for UI: drop junk, dedupe labels, one exact hit → card;
-    several exact hits → show only those; otherwise keep fuzzy list.
+    several exact hits → show only those; weak fuzzy → miss (no garbage buttons).
     """
     if not hits:
         return hits
@@ -38,11 +39,52 @@ def pick_search_hits(hits: list[formulary_search.DrugHit]) -> list[formulary_sea
     if not hits:
         return hits
     exact = [h for h in hits if h.is_exact]
-    if len(exact) == 1:
-        return exact
-    if len(exact) > 1:
-        return exact
-    return hits
+    if exact:
+        inn_exact = [
+            h
+            for h in exact
+            if fold_match_key(h.canonical_name_en) == fold_match_key(h.matched_alias)
+            or fold_match_key(h.canonical_name_ru) == fold_match_key(h.matched_alias)
+        ]
+        return inn_exact or exact
+    confident = [h for h in hits if h.score >= 90]
+    return confident
+
+
+def search_with_analogs(query: str, *, limit: int = 5) -> list[formulary_search.DrugHit]:
+    """Local search, then brand→INN resolver if there is no confident hit."""
+    hits = pick_search_hits(search(query, limit=limit))
+    if hits:
+        return hits
+    from services.drug_alias_resolver import resolve_brand
+
+    resolved = resolve_brand(query)
+    if not resolved:
+        return []
+    seen: set[int] = set()
+    analog_hits: list[formulary_search.DrugHit] = []
+    for term in resolved.inn_terms:
+        for hit in pick_search_hits(search(term, limit=limit)):
+            if hit.drug_id in seen:
+                continue
+            seen.add(hit.drug_id)
+            analog_hits.append(hit)
+        if analog_hits:
+            break
+    if analog_hits:
+        try:
+            from scripts.formulary.build_db import inn_match_key
+
+            hit = analog_hits[0]
+            if resolved.source == "dict" and any(
+                inn_match_key(term) == inn_match_key(hit.canonical_name_en)
+                or fold_match_key(term) == fold_match_key(hit.canonical_name_en)
+                for term in resolved.inn_terms
+            ):
+                formulary_search.persist_query_alias(hit.drug_id, query)
+        except Exception as exc:
+            logger.warning("persist analog alias failed: %s", exc)
+    return analog_hits
 
 
 def deliver_brief(
@@ -127,23 +169,32 @@ def answer_qa(user: User, drug_id: int, question: str) -> DosageOutcome:
 
 
 def ask_ai(user: User, question: str) -> DosageOutcome:
-    """Free-form AI answer without KB; counts toward free dosage limit."""
+    """Grounded fallback: RAG over the formulary, no invented mg/kg."""
     access = dosage_access.check_dosage_access(user)
     if not access.allowed:
         return DosageOutcome(
             kind="error",
             text="Лимит запросов исчерпан. Оформите подписку «Дозировки» (200 ₽/мес).",
         )
+    chunks = formulary_rag.retrieve(question)
+    relevant = [c for c in chunks if c.score >= 0.25]
+    chunks_text = formulary_rag.format_chunks_for_prompt(relevant)
     try:
         if not llm_client.is_configured():
-            text = (
-                "ИИ недоступен: в .env не задан ключ выбранного провайдера "
-                "(OPENAI_API_KEY или ANTHROPIC_API_KEY).\n\n"
-                "Без ключа нельзя перевести ответ и ответить вне справочника.\n"
-                "⚠️ Это не замена справочнику и клиническому решению врача."
-            )
+            if relevant:
+                text = (
+                    "ИИ-перевод недоступен (нет ключа провайдера). "
+                    "Ниже — фрагменты справочника без доработки:\n\n"
+                    + "\n\n".join(c.text for c in relevant[:4])
+                )
+            else:
+                text = (
+                    "В локальных справочниках (BSAVA / Carpenter / ручной список) "
+                    "данных по запросу нет. Дозу указать не могу.\n\n"
+                    "Дисклеймер: ответ не заменяет formulary и клиническое решение врача."
+                )
         else:
-            text = llm_client.ask_ai_fallback(question)
+            text = llm_client.ask_ai_fallback(question, chunks_text)
     except llm_client.LLMError as exc:
         logger.warning("ask_ai_fallback failed: %s", exc)
         return DosageOutcome(

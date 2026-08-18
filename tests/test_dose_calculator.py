@@ -156,7 +156,7 @@ def test_minmax_warning():
 
 def test_check_minmax_in_range():
     msg = check_minmax(5.0, 1.0, 10.0)
-    assert "пределах" in msg
+    assert msg == ""
 
 
 def test_resolve_dose_from_rows_prefers_species():
@@ -183,6 +183,82 @@ def test_resolve_dose_from_rows_prefers_species():
     assert dmin == 0.2
     assert dmax == 0.4
     assert row["taxa"] == "mammals"
+
+
+def test_guinea_pig_ganaton_round_dissolution():
+    result = calculate(
+        weight_kg=0.5,
+        dose_mg_per_kg=10.0,
+        form="tablet",
+        mg_per_unit=50.0,
+    )
+    assert result.ok
+    assert result.method == "dissolution"
+    assert result.total_mg == pytest.approx(5.0)
+    assert result.dissolve_volume_ml == pytest.approx(5.0)
+    assert result.draw_volume_ml == pytest.approx(0.5)
+    message = result.format_message()
+    assert "пределах справочника" not in message
+    assert "5 мл" in message
+    assert "0.5 мл" in message
+
+
+def test_resolve_dose_prefers_guinea_pig_not_crab():
+    rows = [
+        {
+            "taxa": "invertebrates",
+            "species_note": "Pacific white shrimp",
+            "dose_min": 100.0,
+            "dose_max": 100.0,
+            "dose_unit": "mg/kg",
+            "source": "carpenter",
+        },
+        {
+            "taxa": "mammals",
+            "species_note": "Most species",
+            "dose_min": 15.0,
+            "dose_max": 30.0,
+            "dose_unit": "mg/kg",
+            "source": "carpenter",
+        },
+    ]
+    mid, dmin, dmax, row = resolve_dose_from_rows(rows, species="морская свинка")
+    assert row["taxa"] == "mammals"
+    assert dmin == 15.0
+    assert 100.0 not in {dmin, dmax, mid}
+
+
+def test_resolve_dose_prefers_guinea_pig_metoclopramide_over_manual():
+    rows = [
+        {
+            "taxa": "mammals",
+            "species_note": "Most species",
+            "dose_min": 0.2,
+            "dose_max": 1.0,
+            "dose_unit": "mg/kg",
+            "source": "carpenter",
+        },
+        {
+            "taxa": "mammals",
+            "species_note": "Guinea pigs / antiemetic",
+            "dose_min": 0.5,
+            "dose_max": 1.0,
+            "dose_unit": "mg/kg",
+            "source": "carpenter",
+        },
+        {
+            "taxa": "mammals",
+            "species_note": "",
+            "dose_min": 6.0,
+            "dose_max": 20.0,
+            "dose_unit": "mg/kg",
+            "source": "manual",
+        },
+    ]
+    mid, dmin, dmax, row = resolve_dose_from_rows(rows, species="морская свинка")
+    assert dmin == pytest.approx(0.5)
+    assert dmax == pytest.approx(1.0)
+    assert "Guinea" in (row.get("species_note") or "")
 
 
 def test_compute_dissolution_reduces_f_when_v_exceeds_cap():

@@ -70,3 +70,14 @@ def test_calculator_upsell_keyboard():
     kb = calculator_upsell_keyboard()
     assert "calculator" in kb
     assert "300" in kb
+
+
+def test_dosage_miss_keyboard_ai_help_label():
+    from bot.keyboards import dosage_miss_keyboard, dosage_after_brief_keyboard
+
+    miss = dosage_miss_keyboard(can_ask_ai=True)
+    assert "Помощь ИИ" in miss
+    after = dosage_after_brief_keyboard(can_ask_ai=True)
+    assert "Помощь ИИ" in after
+    assert "Спросить ИИ" not in miss
+    assert "Спросить ИИ" not in after

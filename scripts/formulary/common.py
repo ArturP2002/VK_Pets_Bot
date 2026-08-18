@@ -29,6 +29,18 @@ TAXA_ALIASES = {
     "птиц": "birds",
     "рептил": "reptiles",
     "амфиб": "amphibians",
+    "guinea pig": "mammals",
+    "guinea pigs": "mammals",
+    "морская свинка": "mammals",
+    "свинк": "mammals",
+    "rabbit": "mammals",
+    "кролик": "mammals",
+    "hamster": "mammals",
+    "хомяк": "mammals",
+    "shrimp": "invertebrates",
+    "crab": "invertebrates",
+    "креветк": "invertebrates",
+    "краб": "invertebrates",
 }
 
 SECTION_KEYS = (
@@ -140,6 +152,15 @@ def transliterate_ru(value: str) -> str:
         else:
             out.append(ch)
     return normalize_name("".join(out))
+
+
+def fold_match_key(value: str) -> str:
+    """Collapse RU/EN spelling so метоклопрамид matches Metoclopramide."""
+    text = transliterate_ru(value or "")
+    text = text.replace("ph", "f").replace("c", "k")
+    if text.endswith("e") and len(text) > 4:
+        text = text[:-1]
+    return text
 
 
 def detect_taxa(text: str) -> str:

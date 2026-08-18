@@ -31,7 +31,8 @@ _LAB_REFERENCE_RE = re.compile(
     r"blood\s+gas|lipoprotein|bone\s+marrow|"
     r"фосфатаз|гемоглобин|гематокрит|лейкоцит|эритроцит|"
     r"биохимич|гематолог|референс|нормальн\s*знач|"
-    r"электрофорез|анализ\s+кров|клиническ\s+анализ"
+    r"электрофорез|анализ\s+кров|клиническ\s+анализ|"
+    r"белок\s*\(?\s*%|protein\s*\(?\s*%"
     r")"
 )
 
@@ -42,19 +43,48 @@ _DIAGNOSIS_RU_RE = re.compile(
     r")"
 )
 
+_BARE_JUNK_RU = frozenset(
+    {
+        "масло",
+        "масла",
+        "кожа",
+        "белок",
+        "финч",
+        "муравьи",
+        "огненные муравьи",
+        "с",
+        "ме",
+    }
+)
+
+_ROUTE_RU_RE = re.compile(
+    r"(?i)^("
+    r"в\s*/\s*[вм]|п\s*/\s*к|"
+    r"интрацеломическ\w*|интраперитонеальн\w*"
+    r")(\s*[,;].*)?$"
+)
+
+
+def _letter_count(name: str) -> int:
+    return sum(1 for ch in name if ch.isalpha())
+
 
 def is_junk_drug_name(name: str) -> bool:
     """True if the label is not a searchable drug name."""
     cleaned = (name or "").strip()
     if not cleaned:
         return True
+    if _letter_count(cleaned) < 3:
+        return True
     if is_junk_agent_name(cleaned):
         return True
     norm = normalize_name(cleaned)
-    if norm in _RU_MONTHS:
+    if norm in _RU_MONTHS or norm in _BARE_JUNK_RU:
         return True
     if _LAB_REFERENCE_RE.search(cleaned):
         return True
     if _DIAGNOSIS_RU_RE.search(cleaned):
+        return True
+    if _ROUTE_RU_RE.match(cleaned):
         return True
     return False

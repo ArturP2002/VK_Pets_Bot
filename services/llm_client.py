@@ -311,13 +311,30 @@ def dosage_qa(drug_context: str, chunks: str, question: str) -> str:
     return strip_markdown_for_chat(chat(system=system, user=user))
 
 
-def ask_ai_fallback(question: str) -> str:
+def ask_ai_fallback(question: str, chunks: str = "") -> str:
     system = _load_prompt("ask_ai_fallback") or (
-        "Ты ветеринарный ИИ-помощник. Препарата нет в локальной базе. "
-        "Ответь осторожно и обязательно добавь жёсткий дисклеймер: "
-        "это не замена справочнику и клиническому решению врача; проверь первоисточник. Без Markdown."
+        "Ты ветеринарный ИИ-помощник. Препарата нет как точного совпадения в поиске. "
+        "Отвечай ТОЛЬКО по переданным фрагментам справочника. "
+        "Если фрагментов нет или они не про этот препарат — не указывай мг/кг. Без Markdown."
     )
-    return strip_markdown_for_chat(chat(system=system, user=question))
+    user = (
+        f"Запрос врача: {question}\n\n"
+        f"Фрагменты справочника:\n{chunks or '(нет фрагментов)'}"
+    )
+    return strip_markdown_for_chat(chat(system=system, user=user))
+
+
+def resolve_brand_inn(query: str) -> dict[str, Any]:
+    """Map a trade name to INN. Must not invent doses."""
+    system = _load_prompt("brand_inn_resolve") or (
+        "Верни JSON {inn_en, inn_ru, aliases, confidence, unknown}. "
+        "Только МНН известного препарата, без доз. Если не уверен — unknown=true."
+    )
+    user = f"Название от врача: {query.strip()}"
+    data = chat_json(system=system, user=user, max_tokens=400)
+    if not isinstance(data, dict):
+        raise LLMError("resolve_brand_inn: expected object")
+    return data
 
 
 def calc_extract(free_text: str) -> dict[str, Any]:

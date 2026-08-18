@@ -52,6 +52,8 @@ def load_name_translation_cache() -> dict[str, dict[str, Any]]:
 
 
 def save_name_translation_cache(entries: dict[str, dict[str, Any]]) -> None:
+    if not entries:
+        return
     path = _translation_cache_path()
     write_jsonl(path, entries.values())
 
@@ -63,7 +65,13 @@ def drug_needs_ai_translation(drug: dict[str, Any]) -> bool:
     if not sources & FOREIGN_SOURCES:
         return False
     en = (drug.get("canonical_name_en") or "").strip()
-    return bool(en) and not _has_cyrillic(en)
+    if not en or _has_cyrillic(en):
+        return False
+    from scripts.formulary.junk_names import is_junk_drug_name
+
+    if is_junk_drug_name(en):
+        return False
+    return True
 
 
 def apply_translation_to_drug(
@@ -221,6 +229,26 @@ INN_SPELLING_CANON = {
     "famcyclovir": "famciclovir",
 }
 
+_TMP_SMX_CANON = "sulfamethoxazole trimethoprim"
+_TMP_SMX_KEYS = {
+    "sulfamethoxazole trimethoprim",
+    "trimethoprim sulfamethoxazole",
+    "trimethoprim sulfa",
+    "sulfa trimethoprim",
+    "cotrimoxazole",
+    "co trimoxazole",
+    "tmp smx",
+    "tmp/smx",
+    "smz tmp",
+    "smx tmp",
+    "biseptol",
+    "бисептол",
+    "bactrim",
+    "бактрим",
+    "ко тримоксазол",
+    "котримоксазол",
+}
+
 _MIN_LOOKUP_KEY_LEN = 3
 
 _TRAILING_CONTINUATION_RE = re.compile(
@@ -272,7 +300,24 @@ _SALT_OR_FORM_WORDS = frozenset(
 
 
 def _spelling_canonical(norm: str) -> str:
-    return INN_SPELLING_CANON.get(norm, norm)
+    mapped = INN_SPELLING_CANON.get(norm, norm)
+    collapsed = re.sub(r"[+/]+", " ", mapped)
+    collapsed = collapsed.replace("-", " ")
+    collapsed = re.sub(r"\s+", " ", collapsed).strip()
+    if collapsed in _TMP_SMX_KEYS:
+        return _TMP_SMX_CANON
+    tokens = set(collapsed.split())
+    if {"sulfamethoxazole", "trimethoprim"} <= tokens or {"sulfa", "trimethoprim"} <= tokens:
+        return _TMP_SMX_CANON
+    if "trimethoprim" in tokens and tokens & {
+        "sulphonamide",
+        "sulfonamide",
+        "sulphonamides",
+        "sulfonamides",
+        "sulpha",
+    }:
+        return _TMP_SMX_CANON
+    return mapped
 
 
 def _is_page_crumb(inner: str) -> bool:
@@ -533,8 +578,14 @@ def merge_sources(
             alias_index[mapped] = key
 
     def ingest(rows: list[dict[str, Any]], priority_label: str) -> None:
+        from scripts.formulary.junk_names import is_junk_drug_name
+
         for raw in rows:
             drug = _prepare_drug(raw)
+            en = (drug.get("canonical_name_en") or "").strip()
+            ru = (drug.get("canonical_name_ru") or "").strip()
+            if en and is_junk_drug_name(en) and (not ru or is_junk_drug_name(ru)):
+                continue
             key = resolve_key(drug)
             if not key:
                 continue
@@ -567,7 +618,31 @@ def merge_sources(
     ingest(bsava, "bsava")
     ingest(carpenter, "carpenter")
     ingest(manual, "manual")
+    _drop_cross_inn_aliases(list(by_key.values()))
     return list(by_key.values())
+
+
+def _drop_cross_inn_aliases(drugs: list[dict[str, Any]]) -> None:
+    """Do not keep another drug's INN as a trade analog (Метоклопрамид ≠ Mosapride)."""
+    from scripts.formulary.common import fold_match_key
+
+    owned: dict[str, int] = {}
+    for idx, drug in enumerate(drugs):
+        for value in (drug.get("canonical_name_en"), drug.get("canonical_name_ru")):
+            key = fold_match_key(value or "")
+            if key:
+                owned[key] = idx
+    for idx, drug in enumerate(drugs):
+        drug["aliases"] = [
+            alias
+            for alias in (drug.get("aliases") or [])
+            if owned.get(fold_match_key(alias), idx) == idx
+        ]
+        drug["trade_names"] = [
+            trade
+            for trade in (drug.get("trade_names") or [])
+            if owned.get(fold_match_key(trade), idx) == idx
+        ]
 
 
 def _alias_rows(drug: dict[str, Any]) -> list[tuple[str, str, str]]:

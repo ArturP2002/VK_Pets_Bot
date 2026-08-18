@@ -15,7 +15,7 @@ from rapidfuzz import fuzz, process
 
 import config
 from scripts.formulary.build_db import inn_match_key
-from scripts.formulary.common import normalize_name, transliterate_ru
+from scripts.formulary.common import fold_match_key, normalize_name, transliterate_ru
 from scripts.formulary.junk_names import is_junk_drug_name
 from scripts.formulary.schema import ensure_schema_extensions
 
@@ -113,12 +113,20 @@ def _pick_ru_alias(aliases: list[str]) -> str:
 
 
 def _is_exact_alias_match(q_norm: str, q_tr: str, alias_norm: str) -> bool:
-    return bool(alias_norm and (alias_norm == q_norm or alias_norm == q_tr))
+    if not alias_norm:
+        return False
+    if alias_norm == q_norm or alias_norm == q_tr:
+        return True
+    q_fold = fold_match_key(q_norm or q_tr)
+    return bool(q_fold and q_fold == fold_match_key(alias_norm))
 
 
 def _is_exact_canonical_match(q_norm: str, q_tr: str, name_ru: str) -> bool:
     ru_norm = normalize_name(name_ru or "")
-    return bool(ru_norm and (ru_norm == q_norm or ru_norm == q_tr))
+    if ru_norm and (ru_norm == q_norm or ru_norm == q_tr):
+        return True
+    q_fold = fold_match_key(q_norm or q_tr)
+    return bool(q_fold and (q_fold == fold_match_key(ru_norm) or q_fold == fold_match_key(name_ru or "")))
 
 
 def _adjust_score_for_query_lang(
@@ -385,6 +393,18 @@ def _persist_runtime_aliases(
                 (alias_id, norm, display),
             )
     conn.commit()
+
+
+def persist_query_alias(drug_id: int, query: str, *, db_path: str | Path | None = None) -> None:
+    """Store a user query as a searchable alias of the resolved drug."""
+    cleaned = (query or "").strip()
+    if not cleaned:
+        return
+    conn = _connect(db_path)
+    try:
+        _persist_runtime_aliases(conn, drug_id, cleaned, [])
+    finally:
+        conn.close()
 
 
 def resolve_display_name_ru(
@@ -784,7 +804,7 @@ def format_empty_drug_message(drug: DrugRecord, *, display_title: str) -> str:
     lines.extend(
         [
             "",
-            "Проверьте первоисточник или воспользуйтесь «Спросить ИИ» "
+            "Проверьте первоисточник или воспользуйтесь «Помощь ИИ» "
             "для общего ответа.",
             "",
             "Можно открыть «Калькулятор дозы» для расчёта по назначению врача.",
@@ -865,8 +885,6 @@ def format_brief_ru(
     lines: list[str] = [f"💊 {title}"]
     if drug.trade_names:
         lines.append(f"Торговые названия: {', '.join(drug.trade_names)}")
-    if drug.sources:
-        lines.append(f"Источники: {', '.join(_source_ru(s) for s in drug.sources)}")
     lines.append("")
 
     sections = [
@@ -903,18 +921,17 @@ def format_brief_ru(
                 species = (d.get("species_note") or "").strip()
                 raw = (d.get("raw_text") or "").strip()
                 dmin, dmax, unit = d.get("dose_min"), d.get("dose_max"), d.get("dose_unit") or ""
-                src = _source_ru(d.get("source"))
                 head = f"  • {species}: " if species else "  • "
                 if raw:
-                    lines.append(f"{head}{raw} [{src}]")
+                    lines.append(f"{head}{raw}")
                 elif dmin is not None or dmax is not None:
                     if dmin is not None and dmax is not None and dmin != dmax:
                         dose_s = f"{dmin}–{dmax} {unit}".strip()
                     else:
                         dose_s = f"{dmin if dmin is not None else dmax} {unit}".strip()
-                    lines.append(f"{head}{dose_s} [{src}]")
+                    lines.append(f"{head}{dose_s}")
                 else:
-                    lines.append(f"{head}(текст дозы не разобран) [{src}]")
+                    lines.append(f"{head}(текст дозы не разобран)")
         if len(drug.doses) > max_doses:
             lines.append(f"  … ещё {len(drug.doses) - max_doses} записей в справочнике")
         lines.append("")

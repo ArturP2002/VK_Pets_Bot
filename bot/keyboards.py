@@ -305,7 +305,7 @@ def dosage_after_brief_keyboard(*, can_ask_ai: bool = False, query: str = "") ->
     if can_ask_ai:
         kb.add_line()
         kb.add_callback_button(
-            "Спросить ИИ",
+            "Помощь ИИ",
             payload={"cmd": "dosage_ask_ai"},
             color=VkKeyboardColor.SECONDARY,
         )
@@ -316,7 +316,7 @@ def dosage_miss_keyboard(*, can_ask_ai: bool) -> str:
     kb = VkKeyboard(inline=True)
     if can_ask_ai:
         kb.add_callback_button(
-            "Спросить ИИ",
+            "Помощь ИИ",
             payload={"cmd": "dosage_ask_ai"},
             color=VkKeyboardColor.PRIMARY,
         )

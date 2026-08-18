@@ -111,7 +111,7 @@ def _handle_query(peer_id: int, user, query: str):
         session.clear_state(user.vk_id)
         return
 
-    hits = dosage_service.pick_search_hits(dosage_service.search(query))
+    hits = dosage_service.search_with_analogs(query)
     if not hits:
         can_ai = dosage_access.can_ask_ai(user)
         session.set_state(
@@ -119,12 +119,15 @@ def _handle_query(peer_id: int, user, query: str):
             states.DOSAGE_ASK_AI if can_ai else states.DOSAGE_WAIT_QUERY,
             {"last_query": query},
         )
-        msg = f"Препарат «{query}» не найден в справочнике."
+        msg = f"Препарат «{query}» не найден в справочнике ExoCare."
         if can_ai:
-            msg += "\n\nМожете нажать «Спросить ИИ» или ввести другой запрос."
+            msg += (
+                "\n\nМожете нажать «Помощь ИИ» — ответ будет по фрагментам "
+                "справочника, без выдуманных доз — или ввести другой запрос."
+            )
         else:
             msg += (
-                "\n\nЛимит исчерпан — «Спросить ИИ» недоступен. "
+                "\n\nЛимит исчерпан — «Помощь ИИ» недоступна. "
                 "Оформите подписку «Дозировки»."
             )
         vk.send_message(peer_id, msg, keyboards.dosage_miss_keyboard(can_ask_ai=can_ai))
@@ -227,21 +230,24 @@ def start_ask_ai(peer_id: int, vk_user_id: int) -> str | None:
     if not dosage_access.can_ask_ai(user):
         vk.send_message(
             peer_id,
-            "«Спросить ИИ» недоступно: лимит исчерпан или нужна подписка «Дозировки».",
+            "«Помощь ИИ» недоступна: лимит исчерпан или нужна подписка «Дозировки».",
             keyboards.dosage_upsell_keyboard(),
         )
         return "Нет доступа"
 
     data = session.get_payload(vk_user_id)
+    last_query = (data.get("last_query") or "").strip()
     session.set_state(
         vk_user_id,
         states.DOSAGE_ASK_AI,
-        {"last_query": data.get("last_query", ""), "drug_id": data.get("drug_id")},
+        {"last_query": last_query, "drug_id": data.get("drug_id")},
     )
+    if last_query:
+        _run_ask_ai(peer_id, user, last_query)
+        return "Ответ ИИ"
     vk.send_message(
         peer_id,
-        "Сформулируйте вопрос для ИИ (препарата нет в локальной базе "
-        "или нужен общий ответ). Ответ засчитывается в лимит 2/24 ч.",
+        "Сформулируйте вопрос для ИИ. Ответ засчитывается в лимит 2/24 ч.",
         back_menu_keyboard(),
     )
     return "Ожидаю вопрос"

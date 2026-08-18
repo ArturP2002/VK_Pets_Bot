@@ -86,7 +86,57 @@ _DIAGNOSIS_LAB_RE = re.compile(
     r"(?i)\b("
     r"block[a-d]?|ratio[a-d]?|bacteria|aerobic|anaerobic|"
     r"hematologic|biochemical|"
-    r"\d+(?:st|nd|rd|th)[-\s]?degree"
+    r"\d+(?:st|nd|rd|th)[-\s]?degree|"
+    r"protein\s*\(?\s*%|"
+    r"белок\s*\(?\s*%"
+    r")\b"
+)
+
+_ROUTE_ONLY_RE = re.compile(
+    r"(?i)^("
+    r"(?:i\.?\s*/?\s*[vmcpso]|s\.?\s*c\.?|p\.?\s*o\.?|i\.?\s*ce|"
+    r"iv|im|sc|sq|po|ice|ip|io|"
+    r"в\s*/\s*[вм]|п\s*/\s*к|"
+    r"интрацеломическ\w*|интраперитонеальн\w*|"
+    r"внутривенн\w*|внутримышечн\w*|подкожн\w*|пероральн\w*"
+    r")"
+    r"(?:\s*[,;/]\s*"
+    r"(?:i\.?\s*/?\s*[vmcpso]|s\.?\s*c\.?|p\.?\s*o\.?|i\.?\s*ce|"
+    r"iv|im|sc|sq|po|ice|ip|io|"
+    r"в\s*/\s*[вм]|п\s*/\s*к|"
+    r"интрацеломическ\w*|интраперитонеальн\w*"
+    r")*)*"
+    r")$"
+)
+
+_BARE_NON_DRUG = frozenset(
+    {
+        "oil",
+        "oils",
+        "масло",
+        "масла",
+        "skin",
+        "кожа",
+        "protein",
+        "белок",
+        "finch",
+        "финч",
+        "fire ants",
+        "fire ant",
+        "огненные муравьи",
+        "муравьи",
+        "ants",
+        "feather",
+        "перо",
+    }
+)
+
+_SPECIES_COMMON_RE = re.compile(
+    r"(?i)\b("
+    r"finch(?:es)?|canary|canaries|sparrow|pigeon|dove|macaw|"
+    r"cockatoo|conure|budgerigar|shrimp|crab|lobster|ant(?:s)?|"
+    r"fire\s+ants?|parrot(?:s)?|finches|"
+    r"финч|канарейк|воробей|голуб|креветк|краб|мурав"
     r")\b"
 )
 
@@ -105,12 +155,14 @@ _SPECIES_ONLY_RE = re.compile(
 )
 # Keep names that look like chemicals even if a species token is present
 # (e.g. "malachite green" must not be banned just because of "green").
+# Bare "oil" is junk; "mineral oil" / "cod liver oil" stay via these tokens.
 _DRUG_LIKE_RE = re.compile(
     r"(?i)("
     r"cillin|mycin|cycline|floxacin|nazole|caine|olol|pril|sartan|"
     r"statin|\bmab\b|\bnib\b|vir\b|faxalone|promazine|cyclovir|"
     r"phenoxy|ethanol|oxicam|chloride|sulfate|oxide|peroxide|"
-    r"\bacid\b|\boil\b|vaccine|extract|hormone|steroid|"
+    r"\bacid\b|mineral\s+oil|cod\s+liver|olive\s+oil|castor\s+oil|"
+    r"vaccine|extract|hormone|steroid|"
     r"antibiotic|antifungal|antiviral"
     r")"
 )
@@ -172,12 +224,18 @@ def _is_protocol_fragment(name: str) -> bool:
     return open_ == -1 or close < open_
 
 
+def _letter_count(name: str) -> int:
+    return sum(1 for ch in name if ch.isalpha())
+
+
 def _is_species_only_name(name: str) -> bool:
     """Reject animal common/scientific names used as the agent, not as species_note."""
     if _DRUG_LIKE_RE.search(name):
         return False
-    lowered = name.lower()
-    if lowered in _SPECIES_ONLY_NAMES:
+    lowered = name.lower().strip()
+    if lowered in _SPECIES_ONLY_NAMES or lowered in _BARE_NON_DRUG:
+        return True
+    if _SPECIES_COMMON_RE.search(lowered):
         return True
     return bool(_SPECIES_ONLY_RE.search(lowered))
 
@@ -186,8 +244,10 @@ def is_junk_agent_name(name: str) -> bool:
     """True if the agent column is not a drug (diagnosis, lab, species, truncated protocol)."""
     if not name:
         return True
-    lowered = name.lower()
+    lowered = name.lower().strip()
     collapsed = re.sub(r"\s+", "", lowered)
+    if _letter_count(name) < 3:
+        return True
     if collapsed in {"contents", "table"} or re.match(r"^table\d", collapsed):
         return True
     if lowered in {
@@ -204,6 +264,12 @@ def is_junk_agent_name(name: str) -> bool:
         "acceptable methods",
         "normal values",
     }:
+        return True
+    if lowered in _BARE_NON_DRUG:
+        return True
+    if re.search(r"(?i)protein\s*\(?\s*%|белок\s*\(?\s*%", name):
+        return True
+    if _ROUTE_ONLY_RE.match(lowered):
         return True
     if _DIAGNOSIS_LAB_RE.search(name):
         return True
@@ -249,10 +315,9 @@ def _clean_agent_name(name: str) -> str:
         return ""
     if name.startswith(("•", "and ", "see ", "the ", "with ")):
         return ""
-    if not re.search(r"[A-Za-z]", name):
+    if _letter_count(name) < 3:
         return ""
-    # Require at least one letter sequence of length >= 3 (drug-like token)
-    if not re.search(r"[A-Za-z]{3,}", name):
+    if not re.search(r"[A-Za-zА-Яа-яЁё]{3,}", name):
         return ""
     if re.match(r"^\d", name) and re.search(r"mg|ml|µg|ug|day|wk", name, re.I):
         return ""
@@ -300,6 +365,7 @@ def parse_tables(text: str) -> list[dict[str, Any]]:
     current_agent = ""
     by_name: dict[str, dict[str, Any]] = {}
     in_table = False
+    pending_wrap = ""
 
     def ensure(agent: str) -> dict[str, Any]:
         key = normalize_name(agent)
@@ -320,16 +386,19 @@ def parse_tables(text: str) -> list[dict[str, Any]]:
             taxa = ch
             current_agent = ""
             in_table = False
+            pending_wrap = ""
             continue
         if re.match(r"^REFERENCES\b", stripped, re.I):
             current_agent = ""
             in_table = False
+            pending_wrap = ""
             continue
         if _TABLE_HEAD_RE.match(stripped):
             low = stripped.lower()
             if any(x in low for x in _NON_DRUG_TABLE):
                 in_table = False
                 current_agent = ""
+                pending_wrap = ""
                 continue
             in_table = True
             continue
@@ -339,10 +408,28 @@ def parse_tables(text: str) -> list[dict[str, Any]]:
             continue
         if any(x in stripped for x in _JUNK_TABLE_LINE):
             in_table = False
+            pending_wrap = ""
             continue
 
         parsed = _split_agent_dose_comment(stripped)
+        if not parsed and pending_wrap:
+            parsed = _split_agent_dose_comment(f"{pending_wrap} {stripped}")
+            if parsed:
+                pending_wrap = ""
         if not parsed:
+            looks_trunc = (
+                len(stripped) <= 24
+                and not re.search(r"\d", stripped)
+                and bool(re.match(r"^[A-ZА-ЯЁ]", stripped))
+                and not re.match(r"^TABLE\b", stripped, re.I)
+            )
+            allow_wrap = looks_trunc and (
+                _letter_count(stripped) < 3 or not is_junk_agent_name(stripped)
+            )
+            if in_table and allow_wrap:
+                pending_wrap = f"{pending_wrap} {stripped}".strip() if pending_wrap else stripped
+                continue
+            pending_wrap = ""
             if current_agent and (
                 DOSE_START_RE.match(stripped) or re.search(r"\d\s*mg", stripped, re.I)
             ):
@@ -365,6 +452,7 @@ def parse_tables(text: str) -> list[dict[str, Any]]:
         if not dosage or dosage in {"—", "-", "–"}:
             continue
 
+        pending_wrap = ""
         drug = ensure(current_agent)
         species_note = ""
         if comment:
@@ -373,9 +461,11 @@ def parse_tables(text: str) -> list[dict[str, Any]]:
                 species_note = sm.group(1).strip()
                 comment = sm.group(2).strip()
         raw_text = dosage if not comment else f"{dosage}; {comment}"
+        detected = detect_taxa(species_note) if species_note else "other"
+        row_taxa = detected if detected != "other" else taxa
         drug["doses"].append(
             dose_dict(
-                taxa=detect_taxa(species_note) if species_note else taxa,
+                taxa=row_taxa,
                 raw_text=raw_text,
                 source="carpenter",
                 species_note=species_note,

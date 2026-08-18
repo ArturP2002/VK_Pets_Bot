@@ -50,6 +50,12 @@ def test_inn_match_key_strips_suffixes_and_trades():
     assert inn_match_key("Meloxicam") != inn_match_key("Meloxicam prolonged-release")
     assert inn_match_key("Meloxicam") != inn_match_key("Meloxicam SR")
     assert inn_match_key("Fluoroquinolones (enrofloxacin") != inn_match_key("Enrofloxacin")
+    assert inn_match_key("Sulfamethoxazole + Trimethoprim") == inn_match_key(
+        "Trimethoprim/sulfamethoxazole"
+    )
+    assert inn_match_key("Бисептол") == inn_match_key("Co-trimoxazole")
+    assert inn_match_key("Bactrim") == inn_match_key("sulfamethoxazole trimethoprim")
+    assert inn_match_key("Trimethoprim/Sulphonamide") == inn_match_key("Trimethoprim/sulfa")
 
 
 def test_merge_enrofloxacin_continuation_and_baytril(tmp_path):
@@ -165,3 +171,24 @@ def test_do_not_merge_class_heading_with_inn():
         [],
     )
     assert len(merged) == 2
+
+
+def test_merge_tmp_smx_aliases_into_one_card():
+    merged = merge_sources(
+        [],
+        [
+            _card("Sulfamethoxazole + Trimethoprim", doses=[_dose("100 mg/kg shrimp")]),
+            _card("Trimethoprim/sulfa", doses=[_dose("15 mg/kg mammals")]),
+            _card("Biseptol", doses=[_dose("30 mg/kg")]),
+        ],
+        [_card("Co-trimoxazole", "Бисептол", source="manual", doses=[_dose("20 мг/кг")])],
+    )
+    assert len(merged) == 1
+    card = merged[0]
+    assert len(card["doses"]) == 4
+    blob = " ".join(
+        [card.get("canonical_name_en") or "", card.get("canonical_name_ru") or ""]
+        + list(card.get("aliases") or [])
+        + list(card.get("trade_names") or [])
+    ).lower()
+    assert "biseptol" in blob or "бисептол" in blob

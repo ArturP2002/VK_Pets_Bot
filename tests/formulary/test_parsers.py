@@ -15,6 +15,9 @@ from scripts.formulary.schema import init_schema
 def test_normalize_and_transliterate():
     assert normalize_name("Diamox®") == "diamox"
     assert "diakarb" in transliterate_ru("Диакарб")
+    from scripts.formulary.common import fold_match_key
+
+    assert fold_match_key("метоклопрамид") == fold_match_key("Metoclopramide")
 
 
 def test_parse_dose_numbers():
@@ -192,7 +195,8 @@ def test_format_brief_ru_labels_and_doses():
     assert "Action:" not in text
     assert "DOSES:" not in text
     assert "Млекопитающие" in text
-    assert "Carpenter" in text or "carpenter" not in text.lower() or "Carpenter" in text
+    assert "Carpenter" not in text
+    assert "ручной" not in text.lower()
     assert "Дозы:" in text
     assert "0.025-0.6 mg/kg" in text
     assert "Калькулятор дозы" in text
@@ -229,6 +233,17 @@ def test_carpenter_junk_agent_names_rejected():
         "TABLE9-2",
         "TABL E 1-1",
         "C ontents",
+        "Fire ants",
+        "Finch",
+        "oil",
+        "Skin",
+        "Protein (%)",
+        "IV",
+        "Me",
+        "с",
+        "в/в, интрацеломически",
+        "масло",
+        "Огненные муравьи",
     ]
     for name in junk:
         assert is_junk_agent_name(name), f"expected junk: {name!r}"
@@ -251,6 +266,7 @@ def test_carpenter_real_drugs_kept():
         "Ketamine",
         "Malachite green",
         "Hydrogen peroxide",
+        "Mineral oil",
         "Cefovecin (Convenia",
         "Afoxolaner (A) + milbemycin",
         "Imidacloprid 10% + moxidectin",
@@ -309,6 +325,47 @@ Phenoxyethanol           0.1-0.5 mL/L              anesthesia
         "alfaxalone (A",
         "acepromazine (A",
     ):
+        assert rejected not in names, names
+
+
+def test_carpenter_metoclopramide_continuation_rows():
+    from scripts.formulary.extract_carpenter import parse_tables
+
+    text = """
+CHAPTER 8 Mammals
+TABLE 8-1 Agents Used in Mammals
+Agent                    Dosage                    Comments
+Metoclopramide           0.2-1 mg/kg PO, SC, IM q12h   Most species
+                         0.5-1 mg/kg PO, SC q6-12h     Guinea pigs / antiemetic
+                         1-5 mg/kg SC, PO q8-12h       Rabbits / GI stasis
+"""
+    drugs = parse_tables(text)
+    names = {d["canonical_name_en"] for d in drugs}
+    assert "Metoclopramide" in names
+    metro = next(d for d in drugs if d["canonical_name_en"] == "Metoclopramide")
+    assert len(metro["doses"]) >= 2
+    notes = " ".join(d.get("species_note") or d.get("raw_text") or "" for d in metro["doses"])
+    assert "Guinea" in notes or "guinea" in notes.lower() or "Most species" in notes
+
+
+def test_carpenter_parse_tables_filters_screenshot_junk():
+    from scripts.formulary.extract_carpenter import parse_tables
+
+    text = """
+CHAPTER 3 Invertebrates
+TABLE 3-1 Agents
+Agent                    Dosage                    Comments
+Fire ants                topical                   pest
+Enrofloxacin             10 mg/kg IM               infection
+oil                      1 ml                      generic
+Finch                    12                        bird
+Skin                     —                         anatomy
+Protein (%)              3-5                       lab
+"""
+    drugs = parse_tables(text)
+    names = {d["canonical_name_en"].lower() for d in drugs}
+    assert "enrofloxacin" in names
+    for rejected in ("fire ants", "oil", "finch", "skin", "protein (%)"):
         assert rejected not in names, names
 
 

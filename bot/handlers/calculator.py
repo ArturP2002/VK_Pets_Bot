@@ -10,8 +10,8 @@ from bot.keyboards import back_menu_keyboard
 from integrations import vk
 from services import (
     calculator_access,
+    dosage_service,
     dose_calculator,
-    formulary_search,
     llm_client,
     session,
     user_service,
@@ -415,13 +415,19 @@ def _enrich_from_formulary(extract: dict[str, Any]) -> dict[str, Any]:
         return out
 
     try:
-        hits = formulary_search.search_drugs(drug_name, limit=1)
+        hits = dosage_service.search_with_analogs(drug_name, limit=5)
     except Exception as exc:
         logger.warning("formulary lookup failed: %s", exc)
         return out
     if not hits:
         return out
-    drug = formulary_search.get_drug(hits[0].drug_id)
+    drug = None
+    from services import formulary_search as _fs
+
+    for hit in hits:
+        drug = _fs.get_drug(hit.drug_id)
+        if drug:
+            break
     if not drug:
         return out
 
@@ -434,12 +440,13 @@ def _enrich_from_formulary(extract: dict[str, Any]) -> dict[str, Any]:
         out["_dose_max"] = dmax
     if (dose is None or dose <= 0) and mid is not None:
         out["dose_mg_per_kg"] = mid
-        src = (row or {}).get("source") or "formulary"
-        out["_dose_source"] = (
-            f"{mid:g} мг/кг (середина {dmin}–{dmax}, {src})"
-            if dmin is not None and dmax is not None
-            else f"{mid:g} мг/кг ({src})"
-        )
+        if dmin is not None and dmax is not None and dmin != dmax:
+            out["_dose_source"] = f"{dmin:g}–{dmax:g} мг/кг"
+        else:
+            out["_dose_source"] = f"{mid:g} мг/кг"
+        notes = (out.get("notes") or "")
+        if re.search(r"отсутств|нет данных|missing", notes, re.I):
+            out["notes"] = None
     return out
 
 

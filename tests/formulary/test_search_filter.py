@@ -105,6 +105,14 @@ def test_junk_names_detected():
     assert is_junk_drug_name("2nd-degree AV block")
     assert not is_junk_drug_name("Ганатон")
     assert not is_junk_drug_name("Фебантел")
+    assert is_junk_drug_name("Огненные муравьи")
+    assert is_junk_drug_name("масло")
+    assert is_junk_drug_name("с")
+    assert is_junk_drug_name("Ме")
+    assert is_junk_drug_name("Кожа")
+    assert is_junk_drug_name("Белок (%)")
+    assert is_junk_drug_name("в/в, интрацеломически")
+    assert is_junk_drug_name("Финч")
 
 
 def test_dedupe_same_display_name_prefers_manual(formulary_db):
