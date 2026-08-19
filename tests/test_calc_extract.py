@@ -47,3 +47,30 @@ def test_merge_fills_gaps_from_naive():
     assert merged["weight_kg"] == 4.0
     assert merged["mg_per_unit"] == 50.0
     assert merged["drug"] == "Amoxicillin"
+
+
+def test_merge_dose_not_overwritten_when_converting_tablet_strength():
+    """
+    Scenario:
+    - current state: dose_mg_per_kg=10, mg_per_unit=15
+    - user says: "пересчитать на 50 мг"
+    LLM may wrongly set dose_mg_per_kg=15 (taking previous mg_per_unit as dose).
+    We should keep dose_mg_per_kg=10 and update only mg_per_unit=50.
+    """
+    primary = {
+        "drug": "Amoxicillin",
+        "weight_kg": None,
+        "dose_mg_per_kg": 15,
+        "form": "tablet",
+        "mg_per_unit": 50,
+    }
+    fallback = {
+        "drug": "amоксициллин",
+        "weight_kg": 1,
+        "dose_mg_per_kg": 10,
+        "form": "tablet",
+        "mg_per_unit": 15,
+    }
+    merged = _merge_extracts(primary, fallback)
+    assert merged["dose_mg_per_kg"] == 10
+    assert merged["mg_per_unit"] == 50

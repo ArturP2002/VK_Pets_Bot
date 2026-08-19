@@ -63,7 +63,7 @@ class CalcResult:
             if self.tablet_fraction is not None and self.mg_per_unit is not None:
                 lines.append(
                     f"• Измельчить {_fmt_tablet_fraction(self.tablet_fraction)} таблетку "
-                    f"({self.mg_per_unit:g} мг)"
+                    f"({(self.mg_per_unit * self.tablet_fraction):g} мг)"
                 )
             if self.dissolve_volume_ml is not None:
                 lines.append(

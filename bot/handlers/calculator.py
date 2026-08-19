@@ -178,6 +178,25 @@ def _merge_extracts(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[s
         if _as_float(out.get(key)) is None and _as_float(fallback.get(key)) is not None:
             out[key] = fallback[key]
         elif _as_float(primary.get(key)) is not None:
+            # Heuristic: when user is converting tablet strength (e.g. "пересчитай на 50 мг"),
+            # LLM may incorrectly read previous mg_per_unit as dose_mg_per_kg.
+            # If primary dose_mg_per_kg equals fallback mg_per_unit, and mg_per_unit is changing,
+            # keep fallback dose_mg_per_kg.
+            if key == "dose_mg_per_kg":
+                p_dose = _as_float(primary.get("dose_mg_per_kg"))
+                p_mg_unit = _as_float(primary.get("mg_per_unit"))
+                f_dose = _as_float(fallback.get("dose_mg_per_kg"))
+                f_mg_unit = _as_float(fallback.get("mg_per_unit"))
+                if (
+                    p_dose is not None
+                    and p_mg_unit is not None
+                    and f_dose is not None
+                    and f_mg_unit is not None
+                    and abs(p_dose - f_mg_unit) <= 1e-9
+                    and abs(p_mg_unit - f_mg_unit) > 1e-9
+                ):
+                    out[key] = fallback[key]
+                    continue
             out[key] = primary[key]
     return _normalize_extract(out)
 
