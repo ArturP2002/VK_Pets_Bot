@@ -155,7 +155,7 @@ def answer_qa(user: User, drug_id: int, question: str) -> DosageOutcome:
     return DosageOutcome(kind="qa", text=text, drug_id=drug_id, counted=False)
 
 
-def ask_ai(user: User, question: str) -> DosageOutcome:
+def ask_ai(user: User, question: str, *, drug_id: int | None = None) -> DosageOutcome:
     """Grounded fallback: RAG over the formulary, no invented mg/kg."""
     access = dosage_access.check_dosage_access(user)
     if not access.allowed:
@@ -163,7 +163,7 @@ def ask_ai(user: User, question: str) -> DosageOutcome:
             kind="error",
             text="Лимит запросов исчерпан. Оформите подписку «Дозировки» (200 ₽/мес).",
         )
-    chunks = formulary_rag.retrieve(question)
+    chunks = formulary_rag.retrieve(question, drug_id=drug_id)
     relevant = [c for c in chunks if c.score >= 0.25]
     chunks_text = formulary_rag.format_chunks_for_prompt(relevant)
     try:
@@ -188,7 +188,7 @@ def ask_ai(user: User, question: str) -> DosageOutcome:
             kind="error",
             text="Не удалось получить ответ ИИ. Попробуйте позже.",
         )
-    dosage_access.record_usage(user.vk_id, kind="ask_ai", drug_id=None)
+    dosage_access.record_usage(user.vk_id, kind="ask_ai", drug_id=drug_id)
     return DosageOutcome(kind="ask_ai", text=text, counted=True)
 
 

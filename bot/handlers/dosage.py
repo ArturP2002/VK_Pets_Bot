@@ -272,9 +272,6 @@ def start_ask_ai(peer_id: int, vk_user_id: int) -> str | None:
         states.DOSAGE_ASK_AI,
         {"last_query": last_query, "drug_id": data.get("drug_id")},
     )
-    if last_query:
-        _run_ask_ai(peer_id, user, last_query)
-        return "Ответ ИИ"
     vk.send_message(
         peer_id,
         "Сформулируйте вопрос для ИИ. Ответ засчитывается в лимит 2/24 ч.",
@@ -289,6 +286,8 @@ def _run_ask_ai(peer_id: int, user, question: str):
     if access.apply_delay and config.FORMULARY_DOSAGE_DELAY_SEC > 0:
         time.sleep(config.FORMULARY_DOSAGE_DELAY_SEC)
 
-    outcome = dosage_service.ask_ai(user, question)
+    data = session.get_payload(user.vk_id) or {}
+    drug_id = data.get("drug_id")
+    outcome = dosage_service.ask_ai(user, question, drug_id=int(drug_id) if drug_id else None)
     session.set_state(user.vk_id, states.DOSAGE_WAIT_QUERY, {})
     vk.send_message(peer_id, outcome.text, back_menu_keyboard())
