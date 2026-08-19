@@ -71,19 +71,6 @@ def search_with_analogs(query: str, *, limit: int = 5) -> list[formulary_search.
             analog_hits.append(hit)
         if analog_hits:
             break
-    if analog_hits:
-        try:
-            from scripts.formulary.build_db import inn_match_key
-
-            hit = analog_hits[0]
-            if resolved.source == "dict" and any(
-                inn_match_key(term) == inn_match_key(hit.canonical_name_en)
-                or fold_match_key(term) == fold_match_key(hit.canonical_name_en)
-                for term in resolved.inn_terms
-            ):
-                formulary_search.persist_query_alias(hit.drug_id, query)
-        except Exception as exc:
-            logger.warning("persist analog alias failed: %s", exc)
     return analog_hits
 
 

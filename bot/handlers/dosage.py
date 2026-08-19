@@ -111,7 +111,11 @@ def _handle_query(peer_id: int, user, query: str):
         session.clear_state(user.vk_id)
         return
 
-    hits = dosage_service.search_with_analogs(query)
+    # If the exact/name match is missing, we still try brand→INN analogs.
+    # In that case we should not pretend that the user-entered brand exists
+    # in the formulary, so we will show a short "analogue" note.
+    direct_hits = dosage_service.pick_search_hits(dosage_service.search(query, limit=5))
+    hits = direct_hits or dosage_service.search_with_analogs(query)
     if not hits:
         can_ai = dosage_access.can_ask_ai(user)
         session.set_state(
@@ -134,6 +138,14 @@ def _handle_query(peer_id: int, user, query: str):
         return
 
     if len(hits) == 1:
+        if not direct_hits:
+            vk.send_message(
+                peer_id,
+                (
+                    f"Препарат «{query}» не найден в справочнике. "
+                    f"Показаны данные по аналогу: {hits[0].display_name}."
+                ),
+            )
         _deliver_hit(
             peer_id,
             user,
