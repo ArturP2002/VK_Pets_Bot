@@ -149,6 +149,14 @@ def test_resolve_display_title_prefers_user_query(formulary_db):
     assert resolve_display_title("Нембутал", drug=drug) == "Нембутал"
 
 
+def test_resolve_display_title_uses_drug_when_user_query_mismatch(formulary_db):
+    _db, ids = formulary_db
+    drug = get_drug(ids["empty_only"])
+    assert drug is not None
+    # Simulate "user typed X, but selected a different candidate".
+    assert resolve_display_title("Нембутал", drug=drug) == "ПустойПреп"
+
+
 def test_apply_display_title_replaces_header():
     text = "💊 Пентобарбитал\n\nДозы:\n• 1 мг/кг"
     out = apply_display_title(text, "Нембутал")

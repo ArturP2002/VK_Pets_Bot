@@ -756,10 +756,44 @@ def resolve_display_title(
     hit: DrugHit | None = None,
     drug: DrugRecord | None = None,
 ) -> str:
-    """Prefer the name the user typed or tapped."""
+    """
+    Prefer the name the user typed or tapped, but only when it matches
+    the selected hit/drug.
+
+    This prevents UI from showing the original search query when the user
+    later selects a different candidate (analog/trade resolver).
+    """
     query = (user_query or "").strip()
     if query:
-        return query
+        q_fold = fold_match_key(query)
+
+        # If we have a hit, validate against it.
+        if hit is not None:
+            hit_candidates = [hit.display_name, hit.matched_alias, hit.canonical_name_ru]
+            if any(c and fold_match_key(c) == q_fold for c in hit_candidates):
+                return query
+
+        # If we have a drug record, validate against its known RU labels.
+        if drug is not None:
+            drug_candidates: list[str] = []
+            if drug.canonical_name_ru:
+                drug_candidates.append(drug.canonical_name_ru)
+            alias_ru = _pick_ru_alias(drug.aliases)
+            if alias_ru:
+                drug_candidates.append(alias_ru)
+            # Also consider all RU aliases so "Нембутал" alias maps correctly.
+            drug_candidates.extend([a for a in (drug.aliases or []) if _has_cyrillic(a)])
+            if drug.canonical_name_en:
+                drug_candidates.append(drug.canonical_name_en)
+
+            if any(c and fold_match_key(c) == q_fold for c in drug_candidates):
+                return query
+
+        logger.debug(
+            "resolve_display_title: ignoring user query '%s' due to mismatch with selected drug/hit",
+            query,
+        )
+
     if hit is not None:
         return hit.display_name
     if drug is not None:
