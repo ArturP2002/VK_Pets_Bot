@@ -265,7 +265,44 @@ def _calculate_tablet(
     raw = total_mg / float(mg_per_unit)
 
     if raw >= PHYSICAL_TABLET_MIN:
+        # Default: physical split. But for half-to-three-quarters doses
+        # we prefer dissolution to avoid hard splitting of tiny tablets.
         tablets = round_to_quarter(raw)
+        if 0.5 <= tablets <= 0.75:
+            v_max, v_max_warning = v_max_for_weight(weight_kg)
+            if v_max is not None:
+                dissolution = compute_dissolution(
+                    total_mg=total_mg,
+                    mg_per_unit=mg_per_unit,
+                    v_max=v_max,
+                )
+                if dissolution is not None:
+                    fraction, dissolve_volume, draw_volume = dissolution
+                    extra_warnings: list[str] = []
+                    if v_max_warning:
+                        extra_warnings.append(v_max_warning)
+                    base_details = (
+                        details
+                        or f"До округления: {raw:g} табл. (по {mg_per_unit:g} мг)."
+                    )
+                    details_final = (
+                        f"По таблеткам: {CalcResult._fmt_tablets(tablets)}. {base_details}"
+                    )
+                    return CalcResult(
+                        ok=True,
+                        total_mg=round(total_mg, 4),
+                        form="tablet",
+                        method="dissolution",
+                        dose_mg_per_kg=float(dose_mg_per_kg),
+                        weight_kg=float(weight_kg),
+                        mg_per_unit=float(mg_per_unit),
+                        tablet_fraction=fraction,
+                        dissolve_volume_ml=round(dissolve_volume, 4),
+                        draw_volume_ml=round(draw_volume, 4),
+                        warning=_join_warnings(warning, extra_warnings),
+                        details=details_final,
+                    )
+
         return CalcResult(
             ok=True,
             total_mg=round(total_mg, 4),

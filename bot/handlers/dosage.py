@@ -138,21 +138,39 @@ def _handle_query(peer_id: int, user, query: str):
         return
 
     if len(hits) == 1:
-        if not direct_hits:
+        chosen = hits[0]
+        display_title = (chosen.display_name or "").strip()
+
+        # If user input is not a true exact match, still go through the "pick" step
+        # (even when there is only one analog option).
+        needs_pick = (not direct_hits) or (display_title.lower() != (query or "").strip().lower())
+        if needs_pick:
+            session.set_state(
+                user.vk_id,
+                states.DOSAGE_PICK,
+                {
+                    "last_query": query,
+                    "candidates": [chosen.drug_id],
+                    "candidate_labels": {chosen.drug_id: display_title},
+                },
+            )
             vk.send_message(
                 peer_id,
                 (
-                    f"Препарат «{query}» не найден в справочнике. "
-                    f"Показаны данные по аналогу: {hits[0].display_name}."
+                    f"Препарат «{query}» не найден как точное совпадение. "
+                    "Выберите вариант из справочника:"
                 ),
+                keyboards.dosage_candidates_keyboard(hits),
             )
+            return
+
         _deliver_hit(
             peer_id,
             user,
-            hits[0].drug_id,
+            chosen.drug_id,
             query,
             access.apply_delay,
-            display_title=hits[0].display_name,
+            display_title=display_title,
         )
         return
 

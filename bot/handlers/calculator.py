@@ -359,8 +359,6 @@ def _show_confirm(peer_id: int, vk_user_id: int, extract: dict):
         lines.append(f"• мг в таблетке: {extract.get('mg_per_unit')}")
     if extract.get("concentration_mg_ml"):
         lines.append(f"• концентрация: {extract.get('concentration_mg_ml')} мг/мл")
-    if extract.get("_dose_source"):
-        lines.append(f"• мг/кг из справочника: {extract['_dose_source']}")
     if extract.get("notes"):
         lines.append(f"• Заметки: {extract['notes']}")
     lines.extend(["", "Рассчитать?"])
@@ -395,8 +393,6 @@ def confirm_calc(peer_id: int, vk_user_id: int, answer: str) -> str | None:
         form=extract.get("form"),
         mg_per_unit=_as_float(extract.get("mg_per_unit")),
         concentration_mg_ml=_as_float(extract.get("concentration_mg_ml")),
-        dose_min=_as_float(extract.get("_dose_min")),
-        dose_max=_as_float(extract.get("_dose_max")),
     )
     session.set_state(vk_user_id, states.CALC_WAIT_TEXT, {"extract": {}})
     vk.send_message(peer_id, result.format_message(), back_menu_keyboard())

@@ -88,6 +88,34 @@ def test_physical_tablet_when_fraction_at_least_quarter():
     assert result.dissolve_volume_ml is None
 
 
+def test_dissolution_preferred_for_half_tablet_dose():
+    result = calculate(
+        weight_kg=1.0,
+        dose_mg_per_kg=0.5,
+        form="tablet",
+        mg_per_unit=1.0,
+    )
+    assert result.ok
+    assert result.method == "dissolution"
+    assert result.dissolve_volume_ml is not None
+    assert result.draw_volume_ml is not None
+    assert "растворение таблетки" in result.format_message().lower()
+
+
+def test_dissolution_preferred_for_three_quarters_tablet_dose():
+    result = calculate(
+        weight_kg=1.0,
+        dose_mg_per_kg=0.75,
+        form="tablet",
+        mg_per_unit=1.0,
+    )
+    assert result.ok
+    assert result.method == "dissolution"
+    assert result.dissolve_volume_ml is not None
+    assert result.draw_volume_ml is not None
+    assert "растворение таблетки" in result.format_message().lower()
+
+
 def test_dissolution_when_fraction_below_quarter():
     result = calculate(
         weight_kg=0.05,
