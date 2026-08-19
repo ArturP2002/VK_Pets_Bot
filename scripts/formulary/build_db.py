@@ -494,6 +494,46 @@ def _lookup_keys(drug: dict[str, Any]) -> list[str]:
 
 
 def _merge_drug(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    incoming_source = str(incoming.get("source") or "").lower()
+
+    if incoming_source == "curated":
+        if (incoming.get("canonical_name_en") or "").strip():
+            base["canonical_name_en"] = incoming["canonical_name_en"].strip()
+        new_ru = (incoming.get("canonical_name_ru") or "").strip()
+        if new_ru:
+            base["canonical_name_ru"] = new_ru
+        base["trade_names"] = merge_unique(
+            list(incoming.get("trade_names") or []) or list(base.get("trade_names") or [])
+        )
+        base["aliases"] = merge_unique(
+            list(incoming.get("aliases") or []) or list(base.get("aliases") or [])
+        )
+        for field in (
+            "pom_note",
+            "formulations",
+            "action",
+            "use",
+            "safety_handling",
+            "contraindications",
+            "adverse_reactions",
+            "drug_interactions",
+            "full_text_en",
+            "full_text_ru",
+        ):
+            value = (incoming.get(field) or "").strip()
+            if value:
+                base[field] = value
+        if incoming.get("doses") is not None:
+            base["doses"] = list(incoming.get("doses") or [])
+        sources = list(base.get("sources") or [])
+        for s in incoming.get("sources") or [incoming.get("source")]:
+            if s and s not in sources:
+                sources.append(s)
+        base["sources"] = sources
+        base["source"] = incoming.get("source") or base.get("source")
+        base["_curated_status"] = incoming.get("status") or base.get("_curated_status")
+        return base
+
     base["canonical_name_en"] = _prefer_display_name(
         base.get("canonical_name_en") or "",
         incoming.get("canonical_name_en") or "",
@@ -502,7 +542,7 @@ def _merge_drug(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any
 
     new_ru = (incoming.get("canonical_name_ru") or "").strip()
     if new_ru:
-        if incoming.get("source") == "manual" or not (base.get("canonical_name_ru") or "").strip():
+        if incoming_source == "manual" or not (base.get("canonical_name_ru") or "").strip():
             base["canonical_name_ru"] = _prefer_display_name(
                 base.get("canonical_name_ru") or "",
                 new_ru,
@@ -530,7 +570,7 @@ def _merge_drug(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any
         if field == "full_text_ru" and incoming.get("full_text_ru"):
             base[field] = _prefer_text(base.get(field, ""), incoming["full_text_ru"])
             continue
-        if incoming.get("source") == "bsava" and incoming.get(field):
+        if incoming_source == "bsava" and incoming.get(field):
             base[field] = _prefer_text(base.get(field, ""), incoming[field])
         else:
             base[field] = _prefer_text(base.get(field, ""), incoming.get(field, ""))
@@ -561,8 +601,9 @@ def merge_sources(
     bsava: list[dict[str, Any]],
     carpenter: list[dict[str, Any]],
     manual: list[dict[str, Any]],
+    curated: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """BSAVA skeleton → Carpenter doses → manual RU fills. One INN → one card."""
+    """BSAVA → Carpenter → manual RU → curated Excel overlay. One INN → one card."""
     by_key: dict[str, dict[str, Any]] = {}
     alias_index: dict[str, str] = {}
 
@@ -570,6 +611,9 @@ def merge_sources(
         for candidate in _lookup_keys(drug):
             if candidate in alias_index:
                 return alias_index[candidate]
+        stable = (drug.get("_stable_key") or drug.get("stable_key") or "").strip()
+        if stable:
+            return stable
         return _match_key(drug)
 
     def index_drug(key: str, merged: dict[str, Any]) -> None:
@@ -584,8 +628,16 @@ def merge_sources(
             drug = _prepare_drug(raw)
             en = (drug.get("canonical_name_en") or "").strip()
             ru = (drug.get("canonical_name_ru") or "").strip()
-            if en and is_junk_drug_name(en) and (not ru or is_junk_drug_name(ru)):
+            if (
+                priority_label != "curated"
+                and en
+                and is_junk_drug_name(en)
+                and (not ru or is_junk_drug_name(ru))
+            ):
                 continue
+            stable = (drug.get("_stable_key") or drug.get("stable_key") or "").strip()
+            if stable:
+                drug["_stable_key"] = stable
             key = resolve_key(drug)
             if not key:
                 continue
@@ -618,8 +670,43 @@ def merge_sources(
     ingest(bsava, "bsava")
     ingest(carpenter, "carpenter")
     ingest(manual, "manual")
+    ingest(curated or [], "curated")
     _drop_cross_inn_aliases(list(by_key.values()))
     return list(by_key.values())
+
+
+def apply_curated_exclusions(
+    drugs: list[dict[str, Any]],
+    curated: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    excluded = {
+        (row.get("stable_key") or row.get("_stable_key") or "").strip()
+        for row in curated
+        if row.get("exclude") or row.get("status") == "skip"
+    }
+    excluded = {key for key in excluded if key}
+    if not excluded:
+        return drugs
+    kept: list[dict[str, Any]] = []
+    for drug in drugs:
+        drug_key = inn_match_key(
+            drug.get("canonical_name_en") or drug.get("canonical_name_ru") or ""
+        )
+        if drug_key in excluded:
+            continue
+        kept.append(drug)
+    logger.info("Curated exclusions removed %s drugs", len(drugs) - len(kept))
+    return kept
+
+
+def extract_curated(path: Path | None = None) -> list[dict[str, Any]]:
+    root = project_root()
+    path = path or Path(os.getenv("FORMULARY_CURATED", str(root / "data" / "formulary_curated.jsonl")))
+    if not path.exists():
+        return []
+    rows = read_jsonl(path)
+    logger.info("Curated overlay: %s rows from %s", len(rows), path)
+    return rows
 
 
 def _drop_cross_inn_aliases(drugs: list[dict[str, Any]]) -> None:
@@ -928,7 +1015,10 @@ def build(
         manual = extract_manual()
         write_jsonl(raw / "manual_ru.jsonl", manual)
 
-    merged = merge_sources(bsava, carpenter, manual)
+    curated = extract_curated()
+
+    merged = merge_sources(bsava, carpenter, manual, curated)
+    merged = apply_curated_exclusions(merged, curated)
     translate_drug_names_batch(merged)
     stats = write_sqlite(merged, db_path)
     stats["chunks"] = 0 if skip_chroma else build_chroma(merged, chroma_dir)
