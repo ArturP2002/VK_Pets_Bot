@@ -267,10 +267,15 @@ def start_ask_ai(peer_id: int, vk_user_id: int) -> str | None:
 
     data = session.get_payload(vk_user_id)
     last_query = (data.get("last_query") or "").strip()
+    display_title = (data.get("display_title") or "").strip()
     session.set_state(
         vk_user_id,
         states.DOSAGE_ASK_AI,
-        {"last_query": last_query, "drug_id": data.get("drug_id")},
+        {
+            "last_query": last_query,
+            "drug_id": data.get("drug_id"),
+            "display_title": display_title,
+        },
     )
     vk.send_message(
         peer_id,
@@ -288,6 +293,12 @@ def _run_ask_ai(peer_id: int, user, question: str):
 
     data = session.get_payload(user.vk_id) or {}
     drug_id = data.get("drug_id")
-    outcome = dosage_service.ask_ai(user, question, drug_id=int(drug_id) if drug_id else None)
+    selected_drug = (data.get("display_title") or data.get("last_query") or "").strip()
+    outcome = dosage_service.ask_ai(
+        user,
+        question,
+        drug_id=int(drug_id) if drug_id else None,
+        selected_drug=selected_drug,
+    )
     session.set_state(user.vk_id, states.DOSAGE_WAIT_QUERY, {})
     vk.send_message(peer_id, outcome.text, back_menu_keyboard())

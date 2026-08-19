@@ -311,13 +311,21 @@ def dosage_qa(drug_context: str, chunks: str, question: str) -> str:
     return strip_markdown_for_chat(chat(system=system, user=user))
 
 
-def ask_ai_fallback(question: str, chunks: str = "") -> str:
+def ask_ai_fallback(question: str, chunks: str = "", *, selected_drug: str = "") -> str:
     system = _load_prompt("ask_ai_fallback") or (
         "Ты ветеринарный ИИ-помощник. Препарата нет как точного совпадения в поиске. "
         "Отвечай ТОЛЬКО по переданным фрагментам справочника. "
         "Если фрагментов нет или они не про этот препарат — не указывай мг/кг. Без Markdown."
     )
+    drug_line = ""
+    if (selected_drug or "").strip():
+        drug_line = (
+            "Контекст диалога: ранее в чате выбран препарат "
+            f"«{selected_drug.strip()}». Вопрос пользователя относится к нему, "
+            "даже если название не повторено в тексте вопроса.\n\n"
+        )
     user = (
+        f"{drug_line}"
         f"Запрос врача: {question}\n\n"
         f"Фрагменты справочника:\n{chunks or '(нет фрагментов)'}"
     )

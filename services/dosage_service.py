@@ -155,7 +155,13 @@ def answer_qa(user: User, drug_id: int, question: str) -> DosageOutcome:
     return DosageOutcome(kind="qa", text=text, drug_id=drug_id, counted=False)
 
 
-def ask_ai(user: User, question: str, *, drug_id: int | None = None) -> DosageOutcome:
+def ask_ai(
+    user: User,
+    question: str,
+    *,
+    drug_id: int | None = None,
+    selected_drug: str = "",
+) -> DosageOutcome:
     """Grounded fallback: RAG over the formulary, no invented mg/kg."""
     access = dosage_access.check_dosage_access(user)
     if not access.allowed:
@@ -181,7 +187,16 @@ def ask_ai(user: User, question: str, *, drug_id: int | None = None) -> DosageOu
                     "Дисклеймер: ответ не заменяет formulary и клиническое решение врача."
                 )
         else:
-            text = llm_client.ask_ai_fallback(question, chunks_text)
+            drug_hint = (selected_drug or "").strip()
+            if not drug_hint and drug_id:
+                drug = formulary_search.get_drug(int(drug_id))
+                if drug:
+                    drug_hint = formulary_search.resolve_display_title(drug=drug)
+            text = llm_client.ask_ai_fallback(
+                question,
+                chunks_text,
+                selected_drug=drug_hint,
+            )
     except llm_client.LLMError as exc:
         logger.warning("ask_ai_fallback failed: %s", exc)
         return DosageOutcome(
