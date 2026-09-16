@@ -167,7 +167,7 @@ def ask_ai(
     if not access.allowed:
         return DosageOutcome(
             kind="error",
-            text="Лимит запросов исчерпан. Оформите подписку «Дозировки» (200 ₽/мес).",
+            text="Модуль дозировок временно недоступен. Попробуйте позже.",
         )
     chunks = formulary_rag.retrieve(question, drug_id=drug_id)
     relevant = [c for c in chunks if c.score >= 0.25]

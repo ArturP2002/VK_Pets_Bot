@@ -148,9 +148,19 @@ def migrate(
         db_module.database = prev
 
     counts: dict[str, int] = {}
-    # Disable FK checks for the load (Postgres); SQLite N/A here.
+    # Optional: disable FK checks during load (needs SUPERUSER). Without it,
+    # ALL_MODELS order must respect foreign keys.
+    replication_role_set = False
     if dst.__class__.__name__ == "PostgresqlDatabase":
-        dst.execute_sql("SET session_replication_role = 'replica'")
+        try:
+            dst.execute_sql("SET session_replication_role = 'replica'")
+            replication_role_set = True
+        except Exception as exc:
+            logger.warning(
+                "Could not set session_replication_role (need SUPERUSER); "
+                "continuing with FK checks on: %s",
+                exc,
+            )
 
     try:
         with dst.atomic():
@@ -163,7 +173,6 @@ def migrate(
                 inserted = 0
                 for row in rows:
                     payload = _row_to_insert(model, row)
-# Also fix insert to use **payload consistently
                     model.insert(**payload).execute()
                     inserted += 1
                 counts[model._meta.table_name] = inserted
@@ -171,7 +180,7 @@ def migrate(
 
             _reset_postgres_sequences(dst)
     finally:
-        if dst.__class__.__name__ == "PostgresqlDatabase":
+        if replication_role_set:
             try:
                 dst.execute_sql("SET session_replication_role = 'origin'")
             except Exception:

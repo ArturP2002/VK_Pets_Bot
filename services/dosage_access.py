@@ -1,4 +1,4 @@
-"""Access control for the dosage module: trial / plan / free 2-per-24h."""
+"""Access control for the dosage module — free for all users."""
 from __future__ import annotations
 
 import sqlite3
@@ -8,7 +8,6 @@ from pathlib import Path
 
 import config
 from models import User
-from services import subscription_service
 
 
 @dataclass
@@ -45,8 +44,8 @@ def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
 
 
 def has_dosage_subscription(user: User) -> bool:
-    """Unlimited dosage: active trial or plan `dosage`."""
-    return subscription_service.can_use_feature(user, "drug_dosage")
+    """Module is free — always treated as unlocked."""
+    return True
 
 
 def count_usage_last_24h(
@@ -55,7 +54,7 @@ def count_usage_last_24h(
     kind: str | None = None,
     db_path: str | Path | None = None,
 ) -> int:
-    """Successful dosage hits (and ask-ai) in the rolling 24h window."""
+    """Successful dosage hits (and ask-ai) in the rolling 24h window (analytics)."""
     since = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
     conn = _connect(db_path)
     try:
@@ -101,55 +100,17 @@ def record_usage(
 
 
 def check_dosage_access(user: User) -> DosageAccess:
-    """
-    Doctors/admins: unlimited, no delay.
-    Free users: up to FORMULARY_FREE_LIMIT_PER_24H successful hits with delay.
-    Subscription/trial: unlimited, no delay.
-    """
-    from services import rbac
-
-    if rbac.is_doctor(user.vk_id):
-        return DosageAccess(
-            allowed=True,
-            reason="staff",
-            has_subscription=True,
-            used_in_window=0,
-            remaining_free=-1,
-            apply_delay=False,
-        )
-
-    if has_dosage_subscription(user):
-        return DosageAccess(
-            allowed=True,
-            reason="ok",
-            has_subscription=True,
-            used_in_window=0,
-            remaining_free=-1,
-            apply_delay=False,
-        )
-
-    used = count_usage_last_24h(user.vk_id)
-    limit = config.FORMULARY_FREE_LIMIT_PER_24H
-    remaining = max(0, limit - used)
-    if remaining <= 0:
-        return DosageAccess(
-            allowed=False,
-            reason="limit_exceeded",
-            has_subscription=False,
-            used_in_window=used,
-            remaining_free=0,
-            apply_delay=False,
-        )
+    """Dosage formulary is free for everyone: unlimited, no delay."""
     return DosageAccess(
         allowed=True,
-        reason="ok",
-        has_subscription=False,
-        used_in_window=used,
-        remaining_free=remaining,
-        apply_delay=True,
+        reason="free",
+        has_subscription=True,
+        used_in_window=0,
+        remaining_free=-1,
+        apply_delay=False,
     )
 
 
 def can_ask_ai(user: User) -> bool:
-    """Ask AI only with remaining free quota or dosage subscription/trial."""
-    return check_dosage_access(user).allowed
+    """Ask AI is included in the free dosage module."""
+    return True

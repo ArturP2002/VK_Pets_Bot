@@ -58,9 +58,9 @@ def start_trial_flow(peer_id: int, user):
             (
                 f"✅ Пробный период {config.TRIAL_DAYS} дней активирован.\n\n"
                 f"Действует до: {sub.ends_at.strftime('%d.%m.%Y')}\n"
-                "Доступны возможности тарифа «Стартовый», а также модули "
-                "«Дозировки препаратов (для врачей)» и "
-                "«Калькулятор дозы (для владельцев)»."
+                "Доступны возможности тарифа «Стартовый».\n"
+                "Модули «Дозировки препаратов» и «Калькулятор дозы» "
+                "бесплатны для всех — без подписки."
             ),
             back_menu_keyboard(),
         )
@@ -91,6 +91,20 @@ def begin_one_time_consultation_flow(peer_id: int, vk_user_id: int, *, after_pay
 def handle_sub_plan(peer_id: int, vk_user_id: int, plan: str):
     if plan == "one_time":
         begin_one_time_consultation_flow(peer_id, vk_user_id)
+        return
+    if plan in ("dosage", "calculator"):
+        labels = {
+            "dosage": "Дозировки препаратов (для врачей)",
+            "calculator": "Калькулятор дозы (для владельцев)",
+        }
+        vk.send_message(
+            peer_id,
+            (
+                f"Модуль «{labels[plan]}» бесплатный для всех пользователей.\n"
+                "Отдельная подписка не нужна — откройте его из главного меню."
+            ),
+            back_menu_keyboard(),
+        )
         return
     session.set_state(vk_user_id, states.SUB_CHOOSE_PERIOD, {"plan": plan})
     vk.send_message(

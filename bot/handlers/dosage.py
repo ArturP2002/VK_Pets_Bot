@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import logging
-import time
 
-import config
 from bot import keyboards, states
 from bot.keyboards import back_menu_keyboard
 from integrations import vk
@@ -16,34 +14,13 @@ MENU_LABEL = "Дозировки препаратов (для врачей)"
 
 
 def start_dosage(peer_id: int, vk_user_id: int):
-    user = user_service.get_or_create_user(vk_user_id)
-    access = dosage_access.check_dosage_access(user)
-    if not access.allowed:
-        vk.send_message(
-            peer_id,
-            (
-                "Лимит бесплатных запросов дозировок исчерпан "
-                f"({dosage_access.count_usage_last_24h(user.vk_id)} за 24 ч).\n\n"
-                "Оформите подписку «Дозировки» — 200 ₽/мес "
-                "(без лимита и без задержки) или дождитесь обновления окна."
-            ),
-            keyboards.dosage_upsell_keyboard(),
-        )
-        return
-
-    hint = ""
-    if not access.has_subscription:
-        hint = (
-            f"\n\nБесплатно: осталось {access.remaining_free} запроса(ов) за 24 ч "
-            f"(задержка ~{config.FORMULARY_DOSAGE_DELAY_SEC} с)."
-        )
-
+    user_service.get_or_create_user(vk_user_id)
     session.set_state(vk_user_id, states.DOSAGE_WAIT_QUERY, {})
     vk.send_message(
         peer_id,
         "💊 Дозировки препаратов (для врачей)\n\n"
-        "Введите название препарата (латиницей или по-русски)."
-        f"{hint}",
+        "Модуль бесплатный и без лимита запросов.\n"
+        "Введите название препарата (латиницей или по-русски).",
         back_menu_keyboard(),
     )
 
@@ -101,40 +78,23 @@ def handle_dosage_message(peer_id: int, vk_user_id: int, text: str) -> bool:
 
 
 def _handle_query(peer_id: int, user, query: str):
-    access = dosage_access.check_dosage_access(user)
-    if not access.allowed:
-        vk.send_message(
-            peer_id,
-            "Лимит запросов исчерпан. Оформите подписку «Дозировки» — 200 ₽/мес.",
-            keyboards.dosage_upsell_keyboard(),
-        )
-        session.clear_state(user.vk_id)
-        return
-
     # If the exact/name match is missing, we still try brand→INN analogs.
     # In that case we should not pretend that the user-entered brand exists
     # in the formulary, so we will show a short "analogue" note.
     direct_hits = dosage_service.pick_search_hits(dosage_service.search(query, limit=5))
     hits = direct_hits or dosage_service.search_with_analogs(query)
     if not hits:
-        can_ai = dosage_access.can_ask_ai(user)
         session.set_state(
             user.vk_id,
-            states.DOSAGE_ASK_AI if can_ai else states.DOSAGE_WAIT_QUERY,
+            states.DOSAGE_ASK_AI,
             {"last_query": query},
         )
-        msg = f"Препарат «{query}» не найден в справочнике ExoCare."
-        if can_ai:
-            msg += (
-                "\n\nМожете нажать «Помощь ИИ» — ответ будет по фрагментам "
-                "справочника, без выдуманных доз — или ввести другой запрос."
-            )
-        else:
-            msg += (
-                "\n\nЛимит исчерпан — «Помощь ИИ» недоступна. "
-                "Оформите подписку «Дозировки»."
-            )
-        vk.send_message(peer_id, msg, keyboards.dosage_miss_keyboard(can_ask_ai=can_ai))
+        msg = (
+            f"Препарат «{query}» не найден в справочнике ExoCare.\n\n"
+            "Можете нажать «Помощь ИИ» — ответ будет по фрагментам "
+            "справочника, без выдуманных доз — или ввести другой запрос."
+        )
+        vk.send_message(peer_id, msg, keyboards.dosage_miss_keyboard(can_ask_ai=True))
         return
 
     if len(hits) == 1:
@@ -169,7 +129,7 @@ def _handle_query(peer_id: int, user, query: str):
             user,
             chosen.drug_id,
             query,
-            access.apply_delay,
+            False,
             display_title=display_title,
         )
         return
@@ -231,15 +191,6 @@ def _deliver_hit(
 
 def pick_drug(peer_id: int, vk_user_id: int, drug_id: int) -> str | None:
     user = user_service.get_or_create_user(vk_user_id)
-    access = dosage_access.check_dosage_access(user)
-    if not access.allowed:
-        vk.send_message(
-            peer_id,
-            "Лимит запросов исчерпан. Оформите подписку «Дозировки» — 200 ₽/мес.",
-            keyboards.dosage_upsell_keyboard(),
-        )
-        return "Лимит исчерпан"
-
     data = session.get_payload(vk_user_id)
     query = data.get("last_query", "")
     labels = data.get("candidate_labels") or {}
@@ -249,22 +200,14 @@ def pick_drug(peer_id: int, vk_user_id: int, drug_id: int) -> str | None:
         user,
         drug_id,
         query,
-        access.apply_delay,
+        False,
         display_title=display_title,
     )
     return "Готово"
 
 
 def start_ask_ai(peer_id: int, vk_user_id: int) -> str | None:
-    user = user_service.get_or_create_user(vk_user_id)
-    if not dosage_access.can_ask_ai(user):
-        vk.send_message(
-            peer_id,
-            "«Помощь ИИ» недоступна: лимит исчерпан или нужна подписка «Дозировки».",
-            keyboards.dosage_upsell_keyboard(),
-        )
-        return "Нет доступа"
-
+    user_service.get_or_create_user(vk_user_id)
     data = session.get_payload(vk_user_id)
     last_query = (data.get("last_query") or "").strip()
     display_title = (data.get("display_title") or "").strip()
@@ -279,7 +222,7 @@ def start_ask_ai(peer_id: int, vk_user_id: int) -> str | None:
     )
     vk.send_message(
         peer_id,
-        "Сформулируйте вопрос для ИИ. Ответ засчитывается в лимит 2/24 ч.",
+        "Сформулируйте вопрос для ИИ. Модуль бесплатный — без лимита запросов.",
         back_menu_keyboard(),
     )
     return "Ожидаю вопрос"
@@ -287,10 +230,6 @@ def start_ask_ai(peer_id: int, vk_user_id: int) -> str | None:
 
 def _run_ask_ai(peer_id: int, user, question: str):
     vk.send_message(peer_id, "Готовлю ответ ИИ…")
-    access = dosage_access.check_dosage_access(user)
-    if access.apply_delay and config.FORMULARY_DOSAGE_DELAY_SEC > 0:
-        time.sleep(config.FORMULARY_DOSAGE_DELAY_SEC)
-
     data = session.get_payload(user.vk_id) or {}
     drug_id = data.get("drug_id")
     selected_drug = (data.get("display_title") or data.get("last_query") or "").strip()

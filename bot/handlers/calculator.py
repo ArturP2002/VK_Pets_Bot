@@ -9,7 +9,6 @@ from bot import keyboards, states
 from bot.keyboards import back_menu_keyboard
 from integrations import vk
 from services import (
-    calculator_access,
     dosage_service,
     dose_calculator,
     llm_client,
@@ -46,24 +45,12 @@ FIELD_PROMPTS = {
 
 
 def start_calculator(peer_id: int, vk_user_id: int):
-    user = user_service.get_or_create_user(vk_user_id)
-    allowed, reason = calculator_access.check_calculator_access(user)
-    if not allowed:
-        vk.send_message(
-            peer_id,
-            (
-                "Калькулятор дозы доступен на пробном периоде "
-                "или по подписке «Калькулятор» — 300 ₽/мес.\n\n"
-                "Тарифы консультаций (Стартовый/Базовый/Премиум) этот модуль не открывают."
-            ),
-            keyboards.calculator_upsell_keyboard(),
-        )
-        return
-
+    user_service.get_or_create_user(vk_user_id)
     session.set_state(vk_user_id, states.CALC_WAIT_TEXT, {"extract": {}})
     vk.send_message(
         peer_id,
         "🧮 Калькулятор дозы (для владельцев)\n\n"
+        "Модуль бесплатный — подписка не нужна.\n\n"
         "Напишите как удобно, своими словами — без шаблонов.\n"
         "Например: «У кота 4 кг, амоксициллин 12 мг/кг, таблетки по 50 мг — сколько давать?»\n\n"
         "Если чего-то не хватит для расчёта, спросим отдельно.\n"
@@ -90,16 +77,6 @@ def handle_calculator_message(peer_id: int, vk_user_id: int, text: str) -> bool:
         return True
 
     user = user_service.get_or_create_user(vk_user_id)
-    allowed, _ = calculator_access.check_calculator_access(user)
-    if not allowed:
-        session.clear_state(vk_user_id)
-        vk.send_message(
-            peer_id,
-            "Доступ к калькулятору закрыт. Оформите подписку «Калькулятор» — 300 ₽/мес.",
-            keyboards.calculator_upsell_keyboard(),
-        )
-        return True
-
     data = session.get_payload(vk_user_id)
 
     if state == states.CALC_WAIT_TEXT:

@@ -77,6 +77,9 @@ def route_event(peer_id: int, vk_user_id: int, payload_raw, event: dict | None =
         if legal.handle_legal_accept(vk_user_id, peer_id):
             return "Документы приняты"
         return "Ошибка принятия документов"
+    if cmd == "main_menu":
+        common.go_main_menu(peer_id, vk_user_id)
+        return "Главное меню"
     if cmd == "clinic_ack":
         legal.handle_clinic_ack(vk_user_id, peer_id)
         return "Подтверждено"

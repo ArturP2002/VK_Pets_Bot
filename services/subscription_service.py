@@ -155,10 +155,9 @@ def expire_subscription(sub: Subscription):
 
 def can_use_feature(user: User, feature: str) -> bool:
     if feature == "drug_dosage":
-        # Unlimited access only; free quota is handled by dosage_access
-        return has_active_trial(user) or get_active_plan_subscription(user, "dosage") is not None
+        return True
     if feature == "dose_calculator":
-        return has_active_trial(user) or get_active_plan_subscription(user, "calculator") is not None
+        return True
 
     plan = effective_plan(user)
     if not plan:

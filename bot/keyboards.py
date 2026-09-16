@@ -322,29 +322,31 @@ def dosage_miss_keyboard(*, can_ask_ai: bool) -> str:
         )
     else:
         kb.add_callback_button(
-            "Подписка Дозировки 200₽",
-            payload={"cmd": "sub_plan", "plan": "dosage"},
-            color=VkKeyboardColor.POSITIVE,
+            "Главное меню",
+            payload={"cmd": "main_menu"},
+            color=VkKeyboardColor.SECONDARY,
         )
     return keyboard_to_json(kb)
 
 
 def dosage_upsell_keyboard() -> str:
+    """Kept for compatibility; module is free — return main menu shortcut."""
     kb = VkKeyboard(inline=True)
     kb.add_callback_button(
-        "Дозировки — 200 ₽/мес",
-        payload={"cmd": "sub_plan", "plan": "dosage"},
-        color=VkKeyboardColor.POSITIVE,
+        "Главное меню",
+        payload={"cmd": "main_menu"},
+        color=VkKeyboardColor.SECONDARY,
     )
     return keyboard_to_json(kb)
 
 
 def calculator_upsell_keyboard() -> str:
+    """Kept for compatibility; module is free — return main menu shortcut."""
     kb = VkKeyboard(inline=True)
     kb.add_callback_button(
-        "Калькулятор — 300 ₽/мес",
-        payload={"cmd": "sub_plan", "plan": "calculator"},
-        color=VkKeyboardColor.POSITIVE,
+        "Главное меню",
+        payload={"cmd": "main_menu"},
+        color=VkKeyboardColor.SECONDARY,
     )
     return keyboard_to_json(kb)
 

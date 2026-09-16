@@ -5,7 +5,8 @@ import config
 from models import Payment, RecurrentAgreement, Subscription, User
 
 PLAN_ORDER = ("starter", "basic", "premium")
-ADDON_PLAN_ORDER = ("dosage", "calculator")
+# Dosage + calculator are free for everyone — not sold as paid add-ons.
+ADDON_PLAN_ORDER: tuple[str, ...] = ()
 
 PLANS: dict[str, dict] = {
     "starter": {
@@ -45,23 +46,23 @@ PLANS: dict[str, dict] = {
     },
     "dosage": {
         "name": "Дозировки",
-        "tagline": "Справочник препаратов без лимита",
+        "tagline": "Бесплатный справочник препаратов",
         "features": [
             "Неограниченный поиск дозировок препаратов",
             "Без задержки выдачи ответа",
             "Уточняющие вопросы по карточке препарата",
             "Кнопка «Помощь ИИ» при отсутствии в базе",
-            "Не включает калькулятор дозы и консультации врача",
+            "Модуль бесплатный для всех пользователей",
         ],
     },
     "calculator": {
         "name": "Калькулятор дозы",
-        "tagline": "Расчёт дозы по весу и форме выпуска",
+        "tagline": "Бесплатный расчёт дозы по весу и форме выпуска",
         "features": [
             "Свободный текст → расчёт таблеток/мл",
             "Подстановка мг/кг из справочника при необходимости",
             "Проверка min–max по справочнику",
-            "Не включает модуль дозировок и консультации врача",
+            "Модуль бесплатный для всех пользователей",
         ],
     },
 }
@@ -151,12 +152,11 @@ def format_catalog_overview() -> str:
     lines.append(f"▸ {ONE_TIME_PLAN['name']} — {config.ONE_TIME_CONSULTATION_PRICE} ₽")
     lines.append(f"  {ONE_TIME_PLAN['tagline']}")
     lines.append("")
-    lines.append("Дополнительно (отдельно от консультаций):")
-    for plan_id in ADDON_PLAN_ORDER:
-        plan = PLANS[plan_id]
-        price = min_monthly_price(plan_id)
-        lines.append(f"▸ {plan['name']} — {price} ₽/мес")
-        lines.append(f"  {plan['tagline']}")
+    lines.append(
+        "Бесплатно для всех (без подписки):\n"
+        "• Дозировки препаратов (для врачей)\n"
+        "• Калькулятор дозы (для владельцев)"
+    )
     return "\n".join(lines)
 
 
