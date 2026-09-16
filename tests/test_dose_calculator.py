@@ -2,6 +2,7 @@
 import pytest
 
 from services.dose_calculator import (
+    CalcResult,
     apply_dissolution_volume_margin,
     calculate,
     check_minmax,
@@ -229,6 +230,13 @@ def test_guinea_pig_ganaton_round_dissolution():
     assert "пределах справочника" not in message
     assert "5 мл" in message
     assert "0.5 мл" in message
+
+
+def test_fmt_ml_rounds_to_hundredths():
+    assert CalcResult._fmt_ml(1.5156) == "1.52"
+    assert CalcResult._fmt_ml(0.7578) == "0.76"
+    assert CalcResult._fmt_ml(2.0) == "2"
+    assert CalcResult._fmt_amount(0.7578) == "0.76"
 
 
 def test_resolve_dose_prefers_guinea_pig_not_crab():

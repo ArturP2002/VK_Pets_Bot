@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from models import User
-from services import subscription_service
+from services import rbac, subscription_service
 
 
 def has_calculator_access(user: User) -> bool:
-    """Calculator: active trial or plan `calculator` only (no free tier)."""
+    """Doctors/admins: free. Others: active trial or plan `calculator`."""
+    if rbac.is_doctor(user.vk_id):
+        return True
     return subscription_service.can_use_feature(user, "dose_calculator")
 
 

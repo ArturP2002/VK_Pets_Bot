@@ -85,6 +85,23 @@ def test_starter_does_not_open_modules(memory_db):
     assert not calculator_access.has_calculator_access(user)
 
 
+def test_doctor_gets_free_dosage_and_calculator(memory_db, tmp_path, monkeypatch):
+    db = tmp_path / "formulary_test.db"
+    monkeypatch.setattr("config.FORMULARY_DB", str(db))
+    monkeypatch.setattr("config.VK_DOCTOR_IDS", [777001])
+    monkeypatch.setattr("config.FORMULARY_FREE_LIMIT_PER_24H", 2)
+
+    user = User.create(vk_id=777001, created_at=datetime.utcnow())
+    for _ in range(5):
+        dosage_access.record_usage(user.vk_id, kind="dosage_hit")
+
+    access = dosage_access.check_dosage_access(user)
+    assert access.allowed
+    assert access.reason == "staff"
+    assert not access.apply_delay
+    assert calculator_access.has_calculator_access(user)
+
+
 def test_calculator_plan(memory_db):
     user = User.create(vk_id=700005, created_at=datetime.utcnow())
     now = datetime.utcnow()

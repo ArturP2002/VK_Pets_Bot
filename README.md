@@ -6,7 +6,8 @@ VK-бот для круглосуточной онлайн-помощи влад
 
 - Python 3.12+
 - [vk_api](https://github.com/python273/vk_api) (Long Poll)
-- Peewee + SQLite
+- Peewee + **PostgreSQL** (основная БД бота; SQLite — fallback через `DB_PATH`)
+- Отдельный SQLite `data/formulary.db` — справочник дозировок (FTS5)
 - Flask (webhook оплаты)
 - APScheduler (напоминания подписки)
 
@@ -18,10 +19,20 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 # Заполните VK_GROUP_TOKEN, VK_GROUP_ID, VK_DOCTOR_CHAT_ID, VK_ADMIN_IDS, VK_DOCTOR_IDS
+# И DATABASE_URL=postgresql://user:pass@localhost:5432/exocare
 
 python main.py seed   # БД + начальные данные
 python main.py        # Бот
 python main.py webhook  # Webhook Т-Банка / mock (порт WEBHOOK_PORT)
+```
+
+### Миграция данных SQLite → PostgreSQL
+
+```bash
+# 1. Создайте БД в Postgres, пропишите DATABASE_URL в .env
+# 2. Скопируйте данные из старого файла:
+python main.py migrate-pg --sqlite data/VK_Pets_DB.db
+# 3. Перезапустите бота (он подхватит DATABASE_URL)
 ```
 
 ## Режим оплаты

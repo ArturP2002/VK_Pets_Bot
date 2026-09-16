@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.formulary.common import (
+    fold_match_key,
     merge_unique,
     normalize_name,
     project_root,
@@ -467,7 +468,12 @@ def _keys_from_text(value: str) -> list[str]:
     for piece in (value, stripped, inn):
         if not piece:
             continue
-        for candidate in (normalize_name(piece), transliterate_ru(piece)):
+        # fold_match_key links EN/RU spellings (Amlodipine ↔ Амлодипин → amlodipin).
+        for candidate in (
+            normalize_name(piece),
+            transliterate_ru(piece),
+            fold_match_key(piece),
+        ):
             if not candidate or len(candidate) < _MIN_LOOKUP_KEY_LEN:
                 continue
             for mapped in (candidate, _spelling_canonical(candidate)):
@@ -497,8 +503,16 @@ def _merge_drug(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any
     incoming_source = str(incoming.get("source") or "").lower()
 
     if incoming_source == "curated":
-        if (incoming.get("canonical_name_en") or "").strip():
-            base["canonical_name_en"] = incoming["canonical_name_en"].strip()
+        # Keep Latin INN in canonical_name_en when possible; Cyrillic belongs in _ru.
+        curated_en = (incoming.get("canonical_name_en") or "").strip()
+        if curated_en:
+            base["canonical_name_en"] = _prefer_display_name(
+                base.get("canonical_name_en") or "",
+                curated_en,
+                prefer_latin=True,
+            )
+            if _has_cyrillic(curated_en) and not (base.get("canonical_name_ru") or "").strip():
+                base["canonical_name_ru"] = curated_en
         new_ru = (incoming.get("canonical_name_ru") or "").strip()
         if new_ru:
             base["canonical_name_ru"] = new_ru
@@ -672,7 +686,38 @@ def merge_sources(
     ingest(manual, "manual")
     ingest(curated or [], "curated")
     _drop_cross_inn_aliases(list(by_key.values()))
-    return list(by_key.values())
+    return collapse_duplicate_en_names(list(by_key.values()))
+
+
+def collapse_duplicate_en_names(drugs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Final safety net for SQLite UNIQUE(canonical_name_en COLLATE NOCASE).
+
+    Curated Excel sometimes puts Cyrillic into EN; that can leave two cards
+    (Latin INN + manual RU) with the same display EN after overlay.
+    """
+    by_en: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    collapsed = 0
+    for drug in drugs:
+        en = (drug.get("canonical_name_en") or "").strip()
+        key = en.casefold() if en else f"__id_{id(drug)}"
+        if key not in by_en:
+            by_en[key] = drug
+            order.append(key)
+            continue
+        base = by_en[key]
+        incoming = dict(drug)
+        # Prefer non-curated merge path (concat doses, prefer Latin EN).
+        if str(incoming.get("source") or "").lower() == "curated":
+            _merge_drug(base, incoming)
+        else:
+            incoming["source"] = incoming.get("source") or "manual"
+            _merge_drug(base, incoming)
+        collapsed += 1
+    if collapsed:
+        logger.info("Collapsed %s duplicate canonical_name_en cards", collapsed)
+    return [by_en[k] for k in order]
 
 
 def apply_curated_exclusions(

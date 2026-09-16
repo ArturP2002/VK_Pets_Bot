@@ -102,9 +102,22 @@ def record_usage(
 
 def check_dosage_access(user: User) -> DosageAccess:
     """
+    Doctors/admins: unlimited, no delay.
     Free users: up to FORMULARY_FREE_LIMIT_PER_24H successful hits with delay.
     Subscription/trial: unlimited, no delay.
     """
+    from services import rbac
+
+    if rbac.is_doctor(user.vk_id):
+        return DosageAccess(
+            allowed=True,
+            reason="staff",
+            has_subscription=True,
+            used_in_window=0,
+            remaining_free=-1,
+            apply_delay=False,
+        )
+
     if has_dosage_subscription(user):
         return DosageAccess(
             allowed=True,

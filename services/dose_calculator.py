@@ -54,16 +54,19 @@ class CalcResult:
             return self.error or "Не удалось выполнить расчёт."
         lines = ["📐 Результат расчёта дозы", ""]
         if self.dose_mg_per_kg is not None and self.weight_kg is not None:
-            lines.append(f"Доза: {self.dose_mg_per_kg:g} мг/кг × {self.weight_kg:g} кг")
+            lines.append(
+                f"Доза: {self._fmt_amount(self.dose_mg_per_kg)} мг/кг × "
+                f"{self._fmt_amount(self.weight_kg)} кг"
+            )
         if self.total_mg is not None:
-            lines.append(f"Всего: {self.total_mg:g} мг")
+            lines.append(f"Всего: {self._fmt_amount(self.total_mg)} мг")
 
         if self.method == "dissolution":
             lines.extend(["", "Способ: растворение таблетки"])
             if self.tablet_fraction is not None and self.mg_per_unit is not None:
                 lines.append(
                     f"• Измельчить {_fmt_tablet_fraction(self.tablet_fraction)} таблетку "
-                    f"({(self.mg_per_unit * self.tablet_fraction):g} мг)"
+                    f"({self._fmt_amount(self.mg_per_unit * self.tablet_fraction)} мг)"
                 )
             if self.dissolve_volume_ml is not None:
                 lines.append(
@@ -110,15 +113,20 @@ class CalcResult:
 
     @staticmethod
     def _fmt_ml(value: float) -> str:
-        if value < 1:
-            rounded = round(value, 2)
-            text = f"{rounded:g}"
-            if "." in text:
-                text = text.rstrip("0").rstrip(".")
-            return text
-        if value == int(value):
-            return f"{int(value)}"
-        return f"{value:g}"
+        """Syringe-friendly volumes: always round to hundredths."""
+        rounded = round(float(value), 2)
+        if rounded == int(rounded):
+            return str(int(rounded))
+        text = f"{rounded:.2f}".rstrip("0").rstrip(".")
+        return text
+
+    @staticmethod
+    def _fmt_amount(value: float) -> str:
+        """Generic numeric display rounded to hundredths."""
+        rounded = round(float(value), 2)
+        if rounded == int(rounded):
+            return str(int(rounded))
+        return f"{rounded:.2f}".rstrip("0").rstrip(".")
 
 
 def round_to_quarter(units: float) -> float:
@@ -222,7 +230,11 @@ def compute_dissolution(
 
 def _fmt_tablet_fraction(fraction: float) -> str:
     mapping = {1.0: "1 целую", 0.5: "½", 0.25: "¼"}
-    return mapping.get(fraction, f"{fraction:g}")
+    return mapping.get(fraction, CalcResult._fmt_amount(fraction))
+
+
+def _fmt_qty(value: float) -> str:
+    return CalcResult._fmt_amount(value)
 
 
 def check_minmax(
@@ -234,13 +246,13 @@ def check_minmax(
         return ""
     if dose_min is not None and dose_mg_per_kg < dose_min:
         return (
-            f"Доза {dose_mg_per_kg:g} мг/кг ниже минимума справочника "
-            f"({dose_min:g} мг/кг)."
+            f"Доза {_fmt_qty(dose_mg_per_kg)} мг/кг ниже минимума справочника "
+            f"({_fmt_qty(dose_min)} мг/кг)."
         )
     if dose_max is not None and dose_mg_per_kg > dose_max:
         return (
-            f"Доза {dose_mg_per_kg:g} мг/кг выше максимума справочника "
-            f"({dose_max:g} мг/кг)."
+            f"Доза {_fmt_qty(dose_mg_per_kg)} мг/кг выше максимума справочника "
+            f"({_fmt_qty(dose_max)} мг/кг)."
         )
     if dose_min is not None and dose_max is not None:
         return ""
@@ -283,7 +295,7 @@ def _calculate_tablet(
                         extra_warnings.append(v_max_warning)
                     base_details = (
                         details
-                        or f"До округления: {raw:g} табл. (по {mg_per_unit:g} мг)."
+                        or f"До округления: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг)."
                     )
                     details_final = (
                         f"По таблеткам: {CalcResult._fmt_tablets(tablets)}. {base_details}"
@@ -313,7 +325,7 @@ def _calculate_tablet(
             weight_kg=float(weight_kg),
             mg_per_unit=float(mg_per_unit),
             warning=warning,
-            details=details or f"До округления: {raw:g} табл. (по {mg_per_unit:g} мг).",
+            details=details or f"До округления: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг).",
         )
 
     v_max, v_max_warning = v_max_for_weight(weight_kg)
@@ -334,7 +346,7 @@ def _calculate_tablet(
                 weight_kg=float(weight_kg),
                 mg_per_unit=float(mg_per_unit),
                 warning=_join_warnings(warning, extra_warnings),
-                details=details or f"До округления: {raw:g} табл. (по {mg_per_unit:g} мг).",
+                details=details or f"До округления: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг).",
             )
         return CalcResult(
             ok=True,
@@ -348,11 +360,11 @@ def _calculate_tablet(
                 warning,
                 extra_warnings
                 + [
-                    f"Доля таблетки {raw:g} меньше ¼ — растворение недоступно при данном весе. "
+                    f"Доля таблетки {_fmt_qty(raw)} меньше ¼ — растворение недоступно при данном весе. "
                     "Уточните дозу или форму выпуска у врача."
                 ],
             ),
-            details=details or f"Расчётная доля: {raw:g} табл. (по {mg_per_unit:g} мг).",
+            details=details or f"Расчётная доля: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг).",
         )
 
     dissolution = compute_dissolution(
@@ -377,7 +389,7 @@ def _calculate_tablet(
                 weight_kg=float(weight_kg),
                 mg_per_unit=float(mg_per_unit),
                 warning=_join_warnings(warning, extra_warnings + [fallback_warning]),
-                details=details or f"До округления: {raw:g} табл. (по {mg_per_unit:g} мг).",
+                details=details or f"До округления: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг).",
             )
         return CalcResult(
             ok=True,
@@ -388,7 +400,7 @@ def _calculate_tablet(
             weight_kg=float(weight_kg),
             mg_per_unit=float(mg_per_unit),
             warning=_join_warnings(warning, extra_warnings + [fallback_warning]),
-            details=details or f"Расчётная доля: {raw:g} табл. (по {mg_per_unit:g} мг).",
+            details=details or f"Расчётная доля: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг).",
         )
 
     fraction, dissolve_volume, draw_volume = dissolution
@@ -406,8 +418,8 @@ def _calculate_tablet(
         warning=_join_warnings(warning, extra_warnings),
         details=details
         or (
-            f"Расчётная доля таблетки {raw:g} (< ¼) — через растворение "
-            f"(лимит шприца {v_max:g} мл)."
+            f"Расчётная доля таблетки {_fmt_qty(raw)} (< ¼) — через растворение "
+            f"(лимит шприца {_fmt_qty(v_max)} мл)."
         ),
     )
 
@@ -476,7 +488,7 @@ def calculate(
             dose_mg_per_kg=float(dose_mg_per_kg),
             weight_kg=float(weight_kg),
             warning=warning,
-            details=details or f"Концентрация: {concentration_mg_ml:g} мг/мл.",
+            details=details or f"Концентрация: {_fmt_qty(concentration_mg_ml)} мг/мл.",
         )
 
     return CalcResult(

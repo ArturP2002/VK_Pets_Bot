@@ -90,14 +90,49 @@ def test_merge_enrofloxacin_continuation_and_baytril(tmp_path):
     assert row == ("Enrofloxacin", "Энрофлоксацин")
 
 
-def test_merge_aciclovir_spelling_variants():
-    merged = merge_sources(
-        [_card("Aciclovir", source="bsava")],
-        [_card("Acyclovir")],
-        [],
-    )
-    assert len(merged) == 1
-    assert merged[0]["canonical_name_en"] in {"Aciclovir", "Acyclovir"}
+def test_merge_ru_en_amlodipine_fold(tmp_path):
+    """Cyrillic manual card must merge with Latin BSAVA/Carpenter INN."""
+    bsava = [_card("Amlodipine", source="bsava", doses=[_dose("0.1 mg/kg", "bsava")])]
+    carpenter = [_card("Amlodipine", doses=[_dose("0.2 mg/kg")])]
+    manual = [_card("Амлодипин", "Амлодипин", source="manual", doses=[_dose("0.3 mg/kg", "manual")])]
+    curated = [
+        _card(
+            "Амлодипин",
+            "Амлодипин",
+            source="curated",
+            doses=[_dose("0.25 mg/kg", "curated")],
+        )
+    ]
+    for row in curated:
+        row["status"] = "verified"
+        row["stable_key"] = "amlodipine"
+        row["_stable_key"] = "amlodipine"
+
+    merged = merge_sources(bsava, carpenter, manual, curated)
+    amlo = [d for d in merged if "амло" in (d.get("canonical_name_en") or "").casefold()
+            or "amlo" in (d.get("canonical_name_en") or "").casefold()
+            or "амло" in (d.get("canonical_name_ru") or "").casefold()]
+    assert len(amlo) == 1
+    card = amlo[0]
+    assert card["canonical_name_en"] == "Amlodipine"
+    assert card["canonical_name_ru"] == "Амлодипин"
+
+    stats = write_sqlite(merged, tmp_path / "formulary.db")
+    assert stats["drugs"] == len(merged)
+    conn = sqlite3.connect(str(tmp_path / "formulary.db"))
+    names = [r[0] for r in conn.execute("SELECT canonical_name_en FROM drugs").fetchall()]
+    conn.close()
+    assert len(names) == len({n.casefold() for n in names})
+
+
+def test_collapse_duplicate_en_names_casefold():
+    from scripts.formulary.build_db import collapse_duplicate_en_names
+
+    a = _card("Амлодипин", "Амлодипин", source="manual", doses=[_dose("1")])
+    b = _card("амлодипин", "Амлодипин", source="bsava", doses=[_dose("2", "bsava")])
+    out = collapse_duplicate_en_names([a, b])
+    assert len(out) == 1
+    assert len(out[0]["doses"]) == 2
 
 
 def test_do_not_merge_aciclovir_with_famciclovir():

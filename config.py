@@ -11,9 +11,12 @@ DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
 
+# Main bot DB: PostgreSQL via DATABASE_URL, or SQLite via DB_PATH.
+# Example: postgresql://exocare:secret@127.0.0.1:5432/exocare
+DATABASE_URL = (os.getenv("DATABASE_URL", "") or "").strip()
 DB_PATH = os.getenv("DB_PATH", str(DATA_DIR / "VK_Pets_DB.db"))
 
-# Formulary / dosage modules (separate DB from tickets)
+# Formulary / dosage modules (separate SQLite DB from tickets)
 FORMULARY_DB = os.getenv("FORMULARY_DB", str(DATA_DIR / "formulary.db"))
 FORMULARY_CHROMA_DIR = os.getenv(
     "FORMULARY_CHROMA_DIR", str(DATA_DIR / "chroma_formulary")
