@@ -611,6 +611,282 @@ def _match_key(drug: dict[str, Any]) -> str:
     return inn_match_key(drug.get("canonical_name_en") or drug.get("canonical_name_ru") or "")
 
 
+_ITOPRIDE_BRANDS = (
+    "ganaton",
+    "ганатон",
+    "itomed",
+    "итомед",
+    "itopride",
+    "итоприд",
+    "itoprid-verteks",
+    "itopride-vertex",
+    "итоприд-вертекс",
+    "итоприд вертекс",
+)
+
+
+def _itopride_brand_keys() -> set[str]:
+    return {fold_match_key(name) for name in _ITOPRIDE_BRANDS if fold_match_key(name)}
+
+
+def _is_itopride_brand(value: str) -> bool:
+    """Ganaton, Itomed and Itopride-Vertex are itopride, not mosapride."""
+    key = fold_match_key(value or "")
+    if not key or key in {"mosaprid", "mosapride", "domperidon", "domperidone"}:
+        return False
+    if key in _itopride_brand_keys():
+        return True
+    parts = [part for part in re.split(r"[\s/+-]+", key) if part]
+    if not parts:
+        return False
+    if parts[0] in {"ganaton", "itomed", "itoprid"} and (
+        len(parts) == 1 or (len(parts) == 2 and parts[1] in {"verteks", "vertex"})
+    ):
+        return True
+    return False
+
+
+def _is_itopride_card(drug: dict[str, Any]) -> bool:
+    en = fold_match_key(drug.get("canonical_name_en") or "")
+    ru = fold_match_key(drug.get("canonical_name_ru") or "")
+    return en in {"itoprid", "itopride"} or ru == "itoprid"
+
+
+def _empty_itopride_card() -> dict[str, Any]:
+    return {
+        "canonical_name_en": "Itopride",
+        "canonical_name_ru": "Итоприд",
+        "trade_names": ["Ганатон", "Ganaton", "Итомед", "Itomed", "Итоприд-Вертекс"],
+        "aliases": [
+            "Итоприд",
+            "Itopride",
+            "Ганатон",
+            "Ganaton",
+            "Итомед",
+            "Itomed",
+            "Итоприд-Вертекс",
+        ],
+        "pom_note": "",
+        "formulations": "",
+        "action": "",
+        "use": "",
+        "safety_handling": "",
+        "contraindications": "",
+        "adverse_reactions": "",
+        "drug_interactions": "",
+        "full_text_en": "",
+        "full_text_ru": "",
+        "doses": [],
+        "sources": ["curated"],
+        "source": "curated",
+        "stable_key": "itopride",
+        "_stable_key": "itopride",
+    }
+
+
+def rehome_itopride_brands(drugs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Move Ganaton / Itomed / Itopride-Vertex off other INNs onto one itopride card."""
+    moved: list[str] = []
+    for drug in drugs:
+        if _is_itopride_card(drug):
+            continue
+
+        def _split(values: list[Any]) -> tuple[list[str], list[str]]:
+            keep: list[str] = []
+            taken: list[str] = []
+            for value in values or []:
+                text = str(value).strip()
+                if text and _is_itopride_brand(text):
+                    taken.append(text)
+                elif text:
+                    keep.append(text)
+            return keep, taken
+
+        aliases, moved_aliases = _split(list(drug.get("aliases") or []))
+        trades, moved_trades = _split(list(drug.get("trade_names") or []))
+        drug["aliases"] = aliases
+        drug["trade_names"] = trades
+        moved.extend(moved_aliases)
+        moved.extend(moved_trades)
+
+    card = next((drug for drug in drugs if _is_itopride_card(drug)), None)
+    if card is None and not moved:
+        return drugs
+    if card is None:
+        card = _empty_itopride_card()
+        drugs.append(card)
+    standard = list(_empty_itopride_card()["aliases"])
+    card["aliases"] = merge_unique([*(card.get("aliases") or []), *standard, *moved])
+    card["trade_names"] = merge_unique(
+        [*(card.get("trade_names") or []), *(_empty_itopride_card()["trade_names"])]
+    )
+    if not (card.get("canonical_name_ru") or "").strip():
+        card["canonical_name_ru"] = "Итоприд"
+    if not (card.get("canonical_name_en") or "").strip():
+        card["canonical_name_en"] = "Itopride"
+    return drugs
+
+
+def _is_coamox_card(drug: dict[str, Any]) -> bool:
+    en = normalize_name(str(drug.get("canonical_name_en") or ""))
+    ru = normalize_name(str(drug.get("canonical_name_ru") or ""))
+    en_flat = en.replace("-", " ").replace("/", " ")
+    if en_flat in {"co amoxiclav", "coamoxiclav"}:
+        return True
+    if "amoxicillin" in en_flat and "clavulan" in en_flat:
+        return True
+    return "амоксициллин" in ru and "клавулан" in ru
+
+
+def attach_clinic_aliases(drugs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Clinic trade names that must resolve to one existing INN card."""
+    extra = ["Амоксиклав", "Amoxiclav"]
+    for drug in drugs:
+        if not _is_coamox_card(drug):
+            continue
+        drug["aliases"] = merge_unique([*(drug.get("aliases") or []), *extra])
+        drug["trade_names"] = merge_unique([*(drug.get("trade_names") or []), *extra])
+    return drugs
+
+
+def apply_clinic_kb_fixes(conn: sqlite3.Connection) -> None:
+    """
+    Patch an already built formulary.db: itopride brands and Amoxiclav alias.
+    Does not copy mosapride doses onto itopride.
+    """
+    conn.row_factory = sqlite3.Row
+    drugs = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT id, canonical_name_en, canonical_name_ru, trade_names FROM drugs"
+        )
+    ]
+    itopride_id = next((int(row["id"]) for row in drugs if _is_itopride_card(row)), None)
+    if itopride_id is None:
+        cur = conn.execute(
+            """
+            INSERT INTO drugs (
+                canonical_name_en, canonical_name_ru, trade_names, sources
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                "Itopride",
+                "Итоприд",
+                json.dumps(_empty_itopride_card()["trade_names"], ensure_ascii=False),
+                json.dumps(["curated"]),
+            ),
+        )
+        itopride_id = int(cur.lastrowid)
+
+    for row in drugs:
+        if int(row["id"]) == itopride_id:
+            continue
+        trades = json.loads(row["trade_names"] or "[]")
+        kept = [name for name in trades if not _is_itopride_brand(str(name))]
+        if kept != trades:
+            conn.execute(
+                "UPDATE drugs SET trade_names = ? WHERE id = ?",
+                (json.dumps(kept, ensure_ascii=False), int(row["id"])),
+            )
+        alias_rows = conn.execute(
+            "SELECT id, alias FROM drug_aliases WHERE drug_id = ?",
+            (int(row["id"]),),
+        ).fetchall()
+        for alias_row in alias_rows:
+            if _is_itopride_brand(alias_row["alias"]):
+                conn.execute("DELETE FROM drug_aliases WHERE id = ?", (alias_row["id"],))
+
+    for alias, alias_norm, lang in _alias_rows(_empty_itopride_card()):
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO drug_aliases(drug_id, alias, alias_norm, lang)
+            VALUES (?, ?, ?, ?)
+            """,
+            (itopride_id, alias, alias_norm, lang),
+        )
+
+    coamox_ids = [int(row["id"]) for row in drugs if _is_coamox_card(row)]
+    stray_norms = {
+        normalize_name("Амоксиклав"),
+        normalize_name("Amoxiclav"),
+        transliterate_ru("Амоксиклав"),
+    }
+    for row in drugs:
+        if int(row["id"]) in coamox_ids:
+            continue
+        stray = conn.execute(
+            """
+            SELECT id FROM drug_aliases
+            WHERE drug_id = ? AND alias_norm IN ({})
+            """.format(",".join("?" for _ in stray_norms)),
+            (int(row["id"]), *sorted(stray_norms)),
+        ).fetchall()
+        for alias_row in stray:
+            conn.execute("DELETE FROM drug_aliases WHERE id = ?", (alias_row["id"],))
+        trade_row = conn.execute(
+            "SELECT trade_names FROM drugs WHERE id = ?",
+            (int(row["id"]),),
+        ).fetchone()
+        trades = json.loads(trade_row["trade_names"] or "[]")
+        kept = [name for name in trades if normalize_name(str(name)) not in stray_norms]
+        if kept != trades:
+            conn.execute(
+                "UPDATE drugs SET trade_names = ? WHERE id = ?",
+                (json.dumps(kept, ensure_ascii=False), int(row["id"])),
+            )
+    for drug_id in coamox_ids:
+        extra = {
+            "canonical_name_en": "",
+            "canonical_name_ru": "",
+            "trade_names": ["Амоксиклав", "Amoxiclav"],
+            "aliases": ["Амоксиклав", "Amoxiclav"],
+        }
+        for alias, alias_norm, lang in _alias_rows(extra):
+            if not alias_norm or alias_norm in {"", normalize_name("")}:
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO drug_aliases(drug_id, alias, alias_norm, lang)
+                VALUES (?, ?, ?, ?)
+                """,
+                (drug_id, alias, alias_norm, lang),
+            )
+        row = conn.execute("SELECT trade_names FROM drugs WHERE id = ?", (drug_id,)).fetchone()
+        trades = json.loads(row["trade_names"] or "[]")
+        merged = merge_unique([*trades, "Амоксиклав", "Amoxiclav"])
+        conn.execute(
+            "UPDATE drugs SET trade_names = ? WHERE id = ?",
+            (json.dumps(merged, ensure_ascii=False), drug_id),
+        )
+
+    conn.execute("DROP TABLE IF EXISTS drugs_fts")
+    conn.execute(
+        """
+        CREATE VIRTUAL TABLE drugs_fts USING fts5(
+            alias_norm,
+            display_name,
+            content='',
+            tokenize='unicode61 remove_diacritics 2'
+        )
+        """
+    )
+    for alias_id, alias_norm, drug_id in conn.execute(
+        "SELECT id, alias_norm, drug_id FROM drug_aliases ORDER BY id"
+    ):
+        display = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(canonical_name_ru, ''), canonical_name_en)
+            FROM drugs WHERE id = ?
+            """,
+            (drug_id,),
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO drugs_fts(rowid, alias_norm, display_name) VALUES (?, ?, ?)",
+            (alias_id, alias_norm, display),
+        )
+    conn.commit()
+
+
 def merge_sources(
     bsava: list[dict[str, Any]],
     carpenter: list[dict[str, Any]],
@@ -686,7 +962,9 @@ def merge_sources(
     ingest(manual, "manual")
     ingest(curated or [], "curated")
     _drop_cross_inn_aliases(list(by_key.values()))
-    return collapse_duplicate_en_names(list(by_key.values()))
+    drugs = collapse_duplicate_en_names(list(by_key.values()))
+    drugs = rehome_itopride_brands(drugs)
+    return attach_clinic_aliases(drugs)
 
 
 def collapse_duplicate_en_names(drugs: list[dict[str, Any]]) -> list[dict[str, Any]]:

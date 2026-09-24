@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from bot import keyboards, states
 from bot.keyboards import back_menu_keyboard
@@ -11,6 +12,19 @@ from services import dosage_access, dosage_service, session, user_service
 logger = logging.getLogger(__name__)
 
 MENU_LABEL = "Дозировки препаратов (для врачей)"
+
+_QUESTION_RE = re.compile(
+    r"(\?|(?:^|\s)(?:"
+    r"как|какая|какой|какие|какое|сколько|можно|почему|когда|зачем|"
+    r"что|чем|побоч\w*|противопоказ\w*|дозировк\w*|доза|дозу|дозы"
+    r")\b)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_question(text: str) -> bool:
+    folded = (text or "").lower().replace("ё", "е")
+    return bool(_QUESTION_RE.search(folded))
 
 
 def start_dosage(peer_id: int, vk_user_id: int):
@@ -60,6 +74,9 @@ def handle_dosage_message(peer_id: int, vk_user_id: int, text: str) -> bool:
             session.set_state(vk_user_id, states.DOSAGE_WAIT_QUERY, {})
             vk.send_message(peer_id, "Введите название препарата:", back_menu_keyboard())
             return True
+        if not _looks_like_question(text):
+            _handle_query(peer_id, user, text)
+            return True
         outcome = dosage_service.answer_qa(user, int(drug_id), text)
         vk.send_message(
             peer_id,
@@ -86,7 +103,7 @@ def _handle_query(peer_id: int, user, query: str):
     if not hits:
         session.set_state(
             user.vk_id,
-            states.DOSAGE_ASK_AI,
+            states.DOSAGE_WAIT_QUERY,
             {"last_query": query},
         )
         msg = (
@@ -183,8 +200,7 @@ def _deliver_hit(
     if outcome.kind == "brief":
         vk.send_message(
             peer_id,
-            "Можете задать уточняющий вопрос по этому препарату "
-            "или открыть калькулятор дозы.",
+            "Можете ввести следующий препарат или задать вопрос по текущему.",
             back_menu_keyboard(),
         )
 

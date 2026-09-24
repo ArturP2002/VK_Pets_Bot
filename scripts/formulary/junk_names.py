@@ -69,12 +69,35 @@ def _letter_count(name: str) -> int:
     return sum(1 for ch in name if ch.isalpha())
 
 
+# Tokens that must never win a search by themselves (fragments of a real name).
+FRAGMENT_MATCH_TOKENS = frozenset(
+    {
+        "acid",
+        "acids",
+        "кислота",
+        "кислоты",
+        "oil",
+        "oils",
+        "масло",
+        "масла",
+        "essential",
+        "male",
+        "female",
+        "самец",
+        "самка",
+        "самцы",
+        "самки",
+        "ici",
+    }
+)
+
+
 def is_junk_drug_name(name: str) -> bool:
     """True if the label is not a searchable drug name."""
     cleaned = (name or "").strip()
     if not cleaned:
         return True
-    if _letter_count(cleaned) < 3:
+    if _letter_count(cleaned) < 4:
         return True
     if is_junk_agent_name(cleaned):
         return True

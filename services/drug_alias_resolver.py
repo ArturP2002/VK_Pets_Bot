@@ -24,8 +24,18 @@ BRAND_TO_INN: dict[str, list[str]] = {
     "biseptol": ["trimethoprim/sulfa", "co-trimoxazole", "бисептол"],
     "бактрим": ["trimethoprim/sulfa", "co-trimoxazole", "bactrim"],
     "bactrim": ["trimethoprim/sulfa", "co-trimoxazole"],
-    "ганатон": ["mosapride", "мозаприд", "ганатон"],
-    "ganaton": ["mosapride", "мозаприд"],
+    "амоксиклав": [
+        "co-amoxiclav",
+        "амоксициллин+клавулановая кислота",
+        "амоксициллин клавулановая кислота",
+    ],
+    "amoxiclav": ["co-amoxiclav", "amoxicillin clavulanate"],
+    "ганатон": ["itopride", "итоприд"],
+    "ganaton": ["itopride", "итоприд"],
+    "итоприд": ["itopride", "итоприд"],
+    "itopride": ["itopride", "итоприд"],
+    "итомед": ["itopride", "итоприд"],
+    "itomed": ["itopride", "итоприд"],
 }
 
 

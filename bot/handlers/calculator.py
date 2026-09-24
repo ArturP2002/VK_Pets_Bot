@@ -175,7 +175,29 @@ def _merge_extracts(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[s
                     out[key] = fallback[key]
                     continue
             out[key] = primary[key]
-    return _normalize_extract(out)
+    return _normalize_extract(_prefer_ampule_fields(out, fallback))
+
+
+def _prefer_ampule_fields(out: dict[str, Any], naive: dict[str, Any]) -> dict[str, Any]:
+    """Ampule strength is not milligrams per tablet."""
+    if not naive.get("_ampule"):
+        return out
+    merged = dict(out)
+    merged["form"] = "solution"
+    merged["mg_per_unit"] = None
+    merged["_ampule"] = True
+    if naive.get("_ampule_mg") is not None:
+        merged["_ampule_mg"] = naive["_ampule_mg"]
+    if naive.get("_ampule_ml") is not None:
+        merged["_ampule_ml"] = naive["_ampule_ml"]
+    if naive.get("concentration_mg_ml"):
+        merged["concentration_mg_ml"] = naive["concentration_mg_ml"]
+    else:
+        merged["concentration_mg_ml"] = None
+    notes = merged.get("notes") or ""
+    if isinstance(notes, str) and re.search(r"ампул", notes, re.I):
+        merged["notes"] = None
+    return merged
 
 
 def _normalize_extract(data: dict[str, Any]) -> dict[str, Any]:
@@ -219,7 +241,21 @@ def _normalize_form(form: Any) -> str | None:
         return None
     if any(x in low for x in ("tablet", "таблет", "табл", "tab")):
         return "tablet"
-    if any(x in low for x in ("solution", "раствор", "инъек", "injection", "liquid", "сироп")):
+    if any(
+        x in low
+        for x in (
+            "solution",
+            "раствор",
+            "инъек",
+            "injection",
+            "liquid",
+            "сироп",
+            "ампул",
+            "амп.",
+            "ampul",
+            "ampoule",
+        )
+    ):
         return "solution"
     if low in ("other", "другое"):
         return "other"
@@ -246,15 +282,28 @@ def _missing_message(extract: dict, missing: list[str]) -> str:
         lines.append("Уже есть: " + "; ".join(found) + ".")
     lines.append("")
     if len(missing) == 1:
-        lines.append(FIELD_PROMPTS.get(missing[0], f"Укажите: {FIELD_LABELS.get(missing[0], missing[0])}."))
+        lines.append(_field_prompt(extract, missing[0]))
     else:
         lines.append("Не хватает для расчёта:")
         for field in missing:
-            label = FIELD_LABELS.get(field, field)
+            label = _field_label(extract, field)
             lines.append(f"• {label}")
         lines.append("")
-        lines.append(FIELD_PROMPTS.get(missing[0], f"Сначала укажите: {FIELD_LABELS.get(missing[0], missing[0])}."))
+        lines.append(_field_prompt(extract, missing[0]))
     return "\n".join(lines)
+
+
+def _field_label(extract: dict, field: str) -> str:
+    if field == "concentration_mg_ml" and extract.get("_ampule_mg"):
+        return "объём ампулы в миллилитрах"
+    return FIELD_LABELS.get(field, field)
+
+
+def _field_prompt(extract: dict, field: str) -> str:
+    if field == "concentration_mg_ml" and extract.get("_ampule_mg"):
+        mg = extract["_ampule_mg"]
+        return f"В ампуле {mg:g} мг. Напишите объём ампулы в мл — например: 2."
+    return FIELD_PROMPTS.get(field, f"Укажите: {FIELD_LABELS.get(field, field)}.")
 
 
 def _fill_missing(peer_id: int, user, text: str, data: dict):
@@ -308,6 +357,19 @@ def _fill_missing(peer_id: int, user, text: str, data: dict):
             vk.send_message(peer_id, "Нужно число. " + FIELD_PROMPTS.get(field, field))
             return
 
+    if (
+        value is not None
+        and field == "concentration_mg_ml"
+        and extract.get("_ampule_mg")
+        and not extract.get("concentration_mg_ml")
+    ):
+        ml = float(value)
+        if ml <= 0:
+            vk.send_message(peer_id, "Объём ампулы должен быть больше 0 мл.")
+            return
+        extract["_ampule_ml"] = ml
+        value = float(extract["_ampule_mg"]) / ml
+
     if value is not None:
         extract[field] = value
     elif field in ("drug", "species", "form", "route", "notes"):
@@ -337,7 +399,7 @@ def _looks_like_full_query(text: str) -> bool:
     low = text.lower()
     has_weight = bool(re.search(r"\d+[.,]?\d*\s*(кг|kg|г\b|g\b)", low))
     has_dose = bool(re.search(r"мг\s*/\s*кг|mg\s*/\s*kg", low))
-    has_form = bool(re.search(r"таблет|раствор|мг\s*/\s*мл|mg\s*/\s*ml", low))
+    has_form = bool(re.search(r"таблет|раствор|ампул|мг\s*/\s*мл|mg\s*/\s*ml", low))
     return sum([has_weight, has_dose, has_form]) >= 2 or (has_weight and has_dose)
 
 
@@ -349,10 +411,14 @@ def _show_confirm(peer_id: int, vk_user_id: int, extract: dict):
         f"• Вид: {extract.get('species') or '—'}",
         f"• Вес: {extract.get('weight_kg')} кг",
         f"• Доза: {extract.get('dose_mg_per_kg')} мг/кг",
-        f"• Форма: {_form_label(extract.get('form'))}",
+        f"• Форма: {_form_label(extract.get('form'), ampule=bool(extract.get('_ampule')))}",
     ]
-    if extract.get("mg_per_unit"):
+    if _normalize_form(extract.get("form")) == "tablet" and extract.get("mg_per_unit"):
         lines.append(f"• мг в таблетке: {extract.get('mg_per_unit')}")
+    if extract.get("_ampule_mg"):
+        lines.append(f"• мг в ампуле: {extract.get('_ampule_mg')}")
+    if extract.get("_ampule_ml"):
+        lines.append(f"• объём ампулы: {extract.get('_ampule_ml')} мл")
     if extract.get("concentration_mg_ml"):
         lines.append(f"• концентрация: {extract.get('concentration_mg_ml')} мг/мл")
     if extract.get("notes"):
@@ -362,7 +428,9 @@ def _show_confirm(peer_id: int, vk_user_id: int, extract: dict):
     vk.send_message(peer_id, "\n".join(lines), keyboards.calc_confirm_keyboard())
 
 
-def _form_label(form: Any) -> str:
+def _form_label(form: Any, *, ampule: bool = False) -> str:
+    if ampule:
+        return "ампула"
     f = _normalize_form(form)
     if f == "tablet":
         return "таблетки"
@@ -539,6 +607,30 @@ def _naive_extract(text: str) -> dict[str, Any]:
     if re.search(r"раствор|сироп|суспенз", low, re.I):
         form = form or "solution"
 
+    ampule = bool(re.search(r"ампул\w*|амп\.|ampoules?|ampules?", low))
+    ampule_mg = None
+    ampule_ml = None
+    ampule_match = re.search(
+        r"(?:ампул\w*|амп\.|ampoules?|ampules?)\s*(?:по\s*)?(\d+[.,]?\d*)\s*мг"
+        r"(?:\s*/\s*(\d+[.,]?\d*)\s*мл)?",
+        low,
+    )
+    if ampule_match is None and ampule:
+        ampule_match = re.search(
+            r"(\d+[.,]?\d*)\s*мг(?:\s*/\s*(\d+[.,]?\d*)\s*мл)?\s*(?:ампул\w*|амп\.)",
+            low,
+        )
+    if ampule_match is not None:
+        ampule = True
+        ampule_mg = float(ampule_match.group(1).replace(",", "."))
+        if ampule_match.group(2):
+            ampule_ml = float(ampule_match.group(2).replace(",", "."))
+    if ampule:
+        form = "solution"
+        mg_unit = None
+        if ampule_mg and ampule_ml:
+            conc = ampule_mg / ampule_ml
+
     species = None
     for word in (
         "котёнок",
@@ -601,7 +693,7 @@ def _naive_extract(text: str) -> dict[str, Any]:
                 drug = name
                 break
 
-    return {
+    result = {
         "drug": drug,
         "species": species,
         "weight_kg": weight,
@@ -613,3 +705,9 @@ def _naive_extract(text: str) -> dict[str, Any]:
         "notes": None,
         "missing_fields": [],
     }
+    if ampule:
+        result["_ampule"] = True
+        result["_ampule_mg"] = ampule_mg
+        if ampule_ml is not None:
+            result["_ampule_ml"] = ampule_ml
+    return result

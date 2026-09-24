@@ -14,6 +14,9 @@ def test_dict_resolves_screenshot_brands():
         "Мелоксивет": "meloxicam",
         "Эпокрин": "epoetin",
         "Бисептол": "trimethoprim",
+        "Амоксиклав": "co-amoxiclav",
+        "Ганатон": "itopride",
+        "Итоприд": "itopride",
     }
     for query, inn in cases.items():
         found = resolve_brand(query, use_llm=False)

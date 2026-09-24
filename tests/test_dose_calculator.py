@@ -73,6 +73,8 @@ def test_hamster_dissolution_via_calculate():
     assert "взбалтывать" in message.lower()
     assert "48 часов" in message.lower()
     assert "справочный" in message.lower()
+    assert "лимит шприца" not in message.lower()
+    assert "расчётная доля таблетки" not in message.lower()
 
 
 def test_physical_tablet_when_fraction_at_least_quarter():
@@ -128,6 +130,53 @@ def test_dissolution_when_fraction_below_quarter():
     assert result.method == "dissolution"
     assert result.total_mg == pytest.approx(0.1)
     assert (result.total_mg / 10.0) < 0.25
+
+
+def test_off_quarter_036_uses_dissolution_not_one_quarter():
+    """1 mg/kg × 1.8 kg, 5 mg tablet → 0.36 tab, not ¼."""
+    result = calculate(
+        weight_kg=1.8,
+        dose_mg_per_kg=1.0,
+        form="tablet",
+        mg_per_unit=5.0,
+    )
+    assert result.ok
+    assert result.method == "dissolution"
+    message = result.format_message()
+    assert "¼" not in message
+    assert "0.36" in message
+    assert "точная доля" in message.lower()
+    assert "растворение таблетки" in message.lower()
+    assert "лимит шприца" not in message.lower()
+
+
+def test_off_quarter_035_uses_dissolution_not_one_quarter():
+    """5 mg/kg × 0.35 kg, 5 mg tablet → 0.35 tab, with dilution steps."""
+    result = calculate(
+        weight_kg=0.35,
+        dose_mg_per_kg=5.0,
+        form="tablet",
+        mg_per_unit=5.0,
+    )
+    assert result.ok
+    assert result.method == "dissolution"
+    message = result.format_message()
+    assert "¼" not in message
+    assert "0.35" in message
+    assert "растворение таблетки" in message.lower()
+    assert "растворить" in message.lower()
+
+
+def test_near_quarter_stays_physical():
+    result = calculate(
+        weight_kg=1.0,
+        dose_mg_per_kg=2.6,
+        form="tablet",
+        mg_per_unit=10.0,
+    )
+    assert result.ok
+    assert result.method == "physical_tablet"
+    assert result.tablets == 0.25
 
 
 def test_physical_tablet_at_exact_quarter():

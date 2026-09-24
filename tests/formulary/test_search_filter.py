@@ -158,6 +158,215 @@ def test_filter_search_hits_dedupes_labels():
     assert filtered[0].drug_id == 1
 
 
+def test_junk_fragments_and_species_names():
+    assert is_junk_drug_name("ICI")
+    assert is_junk_drug_name("кислота")
+    assert is_junk_drug_name("Самец")
+    assert is_junk_drug_name("Свинка морская")
+    assert is_junk_drug_name("Guinea pig")
+    assert not is_junk_drug_name("Амоксициллин")
+    assert not is_junk_drug_name("Co-amoxiclav")
+
+
+@pytest.fixture
+def fragment_db(tmp_path, monkeypatch):
+    db_path = tmp_path / "fragments.db"
+    conn = sqlite3.connect(str(db_path))
+    init_schema(conn)
+    _insert_drug(
+        conn,
+        name_en="ICI",
+        name_ru="ICI",
+        sources=["carpenter"],
+        aliases=[("ICI", "ici", "en")],
+    )
+    _insert_drug(
+        conn,
+        name_en="acid",
+        name_ru="кислота",
+        sources=["carpenter"],
+        aliases=[("acid", "acid", "en"), ("кислота", "кислота", "ru")],
+    )
+    _insert_drug(
+        conn,
+        name_en="Amoxicillin",
+        name_ru="Амоксициллин",
+        sources=["bsava"],
+        aliases=[
+            ("Amoxicillin", "amoxicillin", "en"),
+            ("Амоксициллин", normalize_name("Амоксициллин"), "ru"),
+        ],
+    )
+    _insert_drug(
+        conn,
+        name_en="Co-amoxiclav",
+        name_ru="Амоксициллин+клавулановая кислота",
+        sources=["curated"],
+        aliases=[
+            ("Co-amoxiclav", "co-amoxiclav", "en"),
+            ("Амоксициллин+клавулановая кислота", normalize_name("Амоксициллин+клавулановая кислота"), "ru"),
+            ("Амоксиклав", normalize_name("Амоксиклав"), "ru"),
+        ],
+    )
+    _insert_drug(
+        conn,
+        name_en="Essential fatty acids",
+        name_ru="Ненасыщенные жирные кислоты",
+        sources=["carpenter"],
+        aliases=[
+            ("Essential fatty acids", "essential fatty acids", "en"),
+            ("Ненасыщенные жирные кислоты", normalize_name("Ненасыщенные жирные кислоты"), "ru"),
+        ],
+    )
+    _insert_drug(
+        conn,
+        name_en="Oregano essential oil",
+        name_ru="Эфирное масло орегано",
+        sources=["carpenter"],
+        aliases=[
+            ("Oregano essential oil", "oregano essential oil", "en"),
+            ("Эфирное масло орегано", normalize_name("Эфирное масло орегано"), "ru"),
+        ],
+    )
+    _insert_drug(
+        conn,
+        name_en="Male",
+        name_ru="Самец",
+        sources=["carpenter"],
+        aliases=[("Male", "male", "en"), ("Самец", "самец", "ru")],
+    )
+    _insert_drug(
+        conn,
+        name_en="Guinea pig",
+        name_ru="Свинка морская",
+        sources=["carpenter"],
+        aliases=[
+            ("Guinea pig", "guinea pig", "en"),
+            ("Свинка морская", normalize_name("Свинка морская"), "ru"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr("config.FORMULARY_DB", str(db_path))
+    monkeypatch.setattr("config.FORMULARY_SEARCH_MIN_SCORE", 60.0)
+    return db_path
+
+
+def test_expanded_coamox_query_skips_fragments(fragment_db):
+    hits = dosage_service.pick_search_hits(
+        search_drugs("Amoxicillin clavulanic acid", limit=8)
+    )
+    labels = {h.display_name.lower() for h in hits}
+    assert "ici" not in labels
+    assert "кислота" not in labels
+    assert "acid" not in labels
+
+
+def test_essentiale_does_not_offer_unrelated_words(fragment_db):
+    hits = dosage_service.pick_search_hits(search_drugs("Эссенциале", limit=8))
+    blob = " ".join(h.display_name.lower() for h in hits)
+    assert "самец" not in blob
+    assert "орегано" not in blob
+    assert "кислот" not in blob
+    assert hits == []
+
+
+def test_guinea_pig_is_not_a_search_hit(fragment_db):
+    assert search_drugs("Свинка морская", limit=5) == []
+
+
+def test_rehome_itopride_does_not_copy_mosapride_doses():
+    from scripts.formulary.build_db import rehome_itopride_brands
+
+    drugs = rehome_itopride_brands(
+        [
+            {
+                "canonical_name_en": "Mosapride",
+                "canonical_name_ru": "Мозаприд",
+                "aliases": ["Мозаприд", "Ганатон", "Итомед", "Итоприд-Вертекс", "Гасмотин"],
+                "trade_names": ["Ганатон", "Гасмотин"],
+                "doses": [{"dose_min": 0.5, "dose_unit": "mg/kg"}],
+            },
+            {
+                "canonical_name_en": "Domperidone",
+                "canonical_name_ru": "Домперидон",
+                "aliases": ["Домперидон", "Ганатон", "Мотилиум"],
+                "trade_names": ["Ганатон", "Мотилиум"],
+                "doses": [],
+            },
+        ]
+    )
+    by_en = {drug["canonical_name_en"]: drug for drug in drugs}
+    assert "Ганатон" not in by_en["Mosapride"]["aliases"]
+    assert "Итомед" not in by_en["Mosapride"]["aliases"]
+    assert "Гасмотин" in by_en["Mosapride"]["aliases"]
+    assert "Ганатон" not in by_en["Domperidone"]["trade_names"]
+    assert "Мотилиум" in by_en["Domperidone"]["trade_names"]
+    itopride = by_en["Itopride"]
+    assert itopride["doses"] == []
+    assert "Ганатон" in itopride["aliases"]
+    assert "Итоприд" in itopride["aliases"]
+
+
+def test_sqlite_itopride_search_is_one_card(tmp_path, monkeypatch):
+    from scripts.formulary.build_db import apply_clinic_kb_fixes
+
+    db_path = tmp_path / "itopride.db"
+    conn = sqlite3.connect(str(db_path))
+    init_schema(conn)
+    mosapride_id = _insert_drug(
+        conn,
+        name_en="Mosapride",
+        name_ru="Мозаприд",
+        sources=["curated"],
+        aliases=[
+            ("Мозаприд", "мозаприд", "ru"),
+            ("Ганатон", "ганатон", "ru"),
+            ("Итомед", "итомед", "ru"),
+        ],
+    )
+    conn.execute(
+        """
+        INSERT INTO doses (drug_id, dose_min, dose_max, dose_unit, raw_text, source)
+        VALUES (?, 0.5, 1.0, 'mg/kg', '0.5-1 мг/кг', 'curated')
+        """,
+        (mosapride_id,),
+    )
+    _insert_drug(
+        conn,
+        name_en="Domperidone",
+        name_ru="Домперидон",
+        sources=["curated"],
+        aliases=[("Домперидон", "домперидон", "ru"), ("Ганатон", "ганатон", "ru")],
+    )
+    conn.commit()
+    apply_clinic_kb_fixes(conn)
+    conn.close()
+
+    monkeypatch.setattr("config.FORMULARY_DB", str(db_path))
+    monkeypatch.setattr("config.FORMULARY_SEARCH_MIN_SCORE", 60.0)
+    ganaton = dosage_service.pick_search_hits(search_drugs("Ганатон", limit=5))
+    itopride = dosage_service.pick_search_hits(search_drugs("Итоприд", limit=5))
+    assert len(ganaton) == 1
+    assert ganaton[0].canonical_name_en == "Itopride"
+    assert len(itopride) == 1
+    assert itopride[0].drug_id == ganaton[0].drug_id
+
+    check = sqlite3.connect(str(db_path))
+    dose_count = check.execute(
+        "SELECT COUNT(*) FROM doses WHERE drug_id = ?",
+        (ganaton[0].drug_id,),
+    ).fetchone()[0]
+    check.close()
+    assert dose_count == 0
+
+
+def test_amoxiclav_resolves_to_single_coamox_card(fragment_db):
+    hits = dosage_service.search_with_analogs("Амоксиклав", limit=5)
+    assert len(hits) == 1
+    assert "клавулан" in hits[0].canonical_name_ru.lower() or hits[0].canonical_name_en == "Co-amoxiclav"
+
+
 def test_pick_search_hits_single_after_dedupe(formulary_db):
     _db, ids = formulary_db
     hits = search_drugs("Ганатон", limit=5)

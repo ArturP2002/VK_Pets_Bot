@@ -21,6 +21,10 @@ DISSOLUTION_DISCLAIMERS = (
 # Calculated tablet fraction below this → dissolution instead of physical split.
 PHYSICAL_TABLET_MIN = 0.25
 
+# Nearest ¼ / ½ / ¾ / whole is shown only when the raw share is this close.
+# 0.24–0.26 stays ¼; 0.35 and 0.36 do not.
+QUARTER_REL_TOLERANCE = 0.10
+
 # Max water volume for tablet dissolution (ml).
 DISSOLUTION_V_MAX_ML = 10.0
 
@@ -132,6 +136,18 @@ class CalcResult:
 def round_to_quarter(units: float) -> float:
     """Round tablet count to nearest ¼ / ½ / ¾ / whole."""
     return round(units * 4) / 4.0
+
+
+def is_close_to_quarter(
+    raw: float,
+    quarter: float,
+    *,
+    tolerance: float = QUARTER_REL_TOLERANCE,
+) -> bool:
+    """True when displaying `quarter` would not misstate `raw` by more than `tolerance`."""
+    if quarter <= 0:
+        return False
+    return abs(float(raw) - float(quarter)) / float(quarter) <= tolerance
 
 
 def v_max_for_weight(weight_kg: float) -> tuple[float | None, str]:
@@ -265,145 +281,51 @@ def _split_minmax_message(warning: str) -> tuple[str, str]:
     return warning, ""
 
 
-def _calculate_tablet(
+def _pre_round_line(raw: float, mg_per_unit: float) -> str:
+    return f"До округления: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг)."
+
+
+def _exact_share_line(raw: float, mg_per_unit: float) -> str:
+    return f"Точная доля: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг)."
+
+
+def _physical_tablet_result(
     *,
     total_mg: float,
-    weight_kg: float,
+    tablets: float,
     dose_mg_per_kg: float,
+    weight_kg: float,
     mg_per_unit: float,
     warning: str,
     details: str,
+    raw: float,
 ) -> CalcResult:
-    raw = total_mg / float(mg_per_unit)
-
-    if raw >= PHYSICAL_TABLET_MIN:
-        # Default: physical split. But for half-to-three-quarters doses
-        # we prefer dissolution to avoid hard splitting of tiny tablets.
-        tablets = round_to_quarter(raw)
-        if 0.5 <= tablets <= 0.75:
-            v_max, v_max_warning = v_max_for_weight(weight_kg)
-            if v_max is not None:
-                dissolution = compute_dissolution(
-                    total_mg=total_mg,
-                    mg_per_unit=mg_per_unit,
-                    v_max=v_max,
-                )
-                if dissolution is not None:
-                    fraction, dissolve_volume, draw_volume = dissolution
-                    extra_warnings: list[str] = []
-                    if v_max_warning:
-                        extra_warnings.append(v_max_warning)
-                    base_details = (
-                        details
-                        or f"До округления: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг)."
-                    )
-                    details_final = (
-                        f"По таблеткам: {CalcResult._fmt_tablets(tablets)}. {base_details}"
-                    )
-                    return CalcResult(
-                        ok=True,
-                        total_mg=round(total_mg, 4),
-                        form="tablet",
-                        method="dissolution",
-                        dose_mg_per_kg=float(dose_mg_per_kg),
-                        weight_kg=float(weight_kg),
-                        mg_per_unit=float(mg_per_unit),
-                        tablet_fraction=fraction,
-                        dissolve_volume_ml=round(dissolve_volume, 4),
-                        draw_volume_ml=round(draw_volume, 4),
-                        warning=_join_warnings(warning, extra_warnings),
-                        details=details_final,
-                    )
-
-        return CalcResult(
-            ok=True,
-            total_mg=round(total_mg, 4),
-            tablets=tablets,
-            form="tablet",
-            method="physical_tablet",
-            dose_mg_per_kg=float(dose_mg_per_kg),
-            weight_kg=float(weight_kg),
-            mg_per_unit=float(mg_per_unit),
-            warning=warning,
-            details=details or f"До округления: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг).",
-        )
-
-    v_max, v_max_warning = v_max_for_weight(weight_kg)
-    extra_warnings: list[str] = []
-    if v_max_warning:
-        extra_warnings.append(v_max_warning)
-
-    if v_max is None:
-        tablets = round_to_quarter(raw)
-        if tablets >= PHYSICAL_TABLET_MIN:
-            return CalcResult(
-                ok=True,
-                total_mg=round(total_mg, 4),
-                tablets=tablets,
-                form="tablet",
-                method="physical_tablet",
-                dose_mg_per_kg=float(dose_mg_per_kg),
-                weight_kg=float(weight_kg),
-                mg_per_unit=float(mg_per_unit),
-                warning=_join_warnings(warning, extra_warnings),
-                details=details or f"До округления: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг).",
-            )
-        return CalcResult(
-            ok=True,
-            total_mg=round(total_mg, 4),
-            form="tablet",
-            method="dissolution_failed",
-            dose_mg_per_kg=float(dose_mg_per_kg),
-            weight_kg=float(weight_kg),
-            mg_per_unit=float(mg_per_unit),
-            warning=_join_warnings(
-                warning,
-                extra_warnings
-                + [
-                    f"Доля таблетки {_fmt_qty(raw)} меньше ¼ — растворение недоступно при данном весе. "
-                    "Уточните дозу или форму выпуска у врача."
-                ],
-            ),
-            details=details or f"Расчётная доля: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг).",
-        )
-
-    dissolution = compute_dissolution(
-        total_mg=total_mg,
-        mg_per_unit=mg_per_unit,
-        v_max=v_max,
+    return CalcResult(
+        ok=True,
+        total_mg=round(total_mg, 4),
+        tablets=tablets,
+        form="tablet",
+        method="physical_tablet",
+        dose_mg_per_kg=float(dose_mg_per_kg),
+        weight_kg=float(weight_kg),
+        mg_per_unit=float(mg_per_unit),
+        warning=warning,
+        details=details or _pre_round_line(raw, mg_per_unit),
     )
-    if dissolution is None:
-        fallback = round_to_quarter(raw)
-        fallback_warning = (
-            "Не удалось уложить дозу растворением в лимит шприца — "
-            "рассмотрите физическую долю таблетки (¼/½/¾) или другую форму выпуска."
-        )
-        if fallback >= PHYSICAL_TABLET_MIN:
-            return CalcResult(
-                ok=True,
-                total_mg=round(total_mg, 4),
-                tablets=fallback,
-                form="tablet",
-                method="physical_tablet",
-                dose_mg_per_kg=float(dose_mg_per_kg),
-                weight_kg=float(weight_kg),
-                mg_per_unit=float(mg_per_unit),
-                warning=_join_warnings(warning, extra_warnings + [fallback_warning]),
-                details=details or f"До округления: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг).",
-            )
-        return CalcResult(
-            ok=True,
-            total_mg=round(total_mg, 4),
-            form="tablet",
-            method="dissolution_failed",
-            dose_mg_per_kg=float(dose_mg_per_kg),
-            weight_kg=float(weight_kg),
-            mg_per_unit=float(mg_per_unit),
-            warning=_join_warnings(warning, extra_warnings + [fallback_warning]),
-            details=details or f"Расчётная доля: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг).",
-        )
 
-    fraction, dissolve_volume, draw_volume = dissolution
+
+def _dissolution_result(
+    *,
+    total_mg: float,
+    dose_mg_per_kg: float,
+    weight_kg: float,
+    mg_per_unit: float,
+    fraction: float,
+    dissolve_volume: float,
+    draw_volume: float,
+    warning: str,
+    details: str,
+) -> CalcResult:
     return CalcResult(
         ok=True,
         total_mg=round(total_mg, 4),
@@ -415,12 +337,119 @@ def _calculate_tablet(
         tablet_fraction=fraction,
         dissolve_volume_ml=round(dissolve_volume, 4),
         draw_volume_ml=round(draw_volume, 4),
-        warning=_join_warnings(warning, extra_warnings),
-        details=details
-        or (
-            f"Расчётная доля таблетки {_fmt_qty(raw)} (< ¼) — через растворение "
-            f"(лимит шприца {_fmt_qty(v_max)} мл)."
-        ),
+        warning=warning,
+        details=details,
+    )
+
+
+def _calculate_tablet(
+    *,
+    total_mg: float,
+    weight_kg: float,
+    dose_mg_per_kg: float,
+    mg_per_unit: float,
+    warning: str,
+    details: str,
+) -> CalcResult:
+    raw = total_mg / float(mg_per_unit)
+    tablets = round_to_quarter(raw)
+    close = is_close_to_quarter(raw, tablets)
+    # Half and three-quarter splits are awkward; dissolve those even when exact.
+    half_band = close and 0.5 <= tablets <= 0.75
+
+    if close and not half_band:
+        return _physical_tablet_result(
+            total_mg=total_mg,
+            tablets=tablets,
+            dose_mg_per_kg=dose_mg_per_kg,
+            weight_kg=weight_kg,
+            mg_per_unit=mg_per_unit,
+            warning=warning,
+            details=details,
+            raw=raw,
+        )
+
+    v_max, v_max_warning = v_max_for_weight(weight_kg)
+    extra_warnings: list[str] = []
+    if v_max_warning:
+        extra_warnings.append(v_max_warning)
+
+    dissolution = None
+    if v_max is not None:
+        dissolution = compute_dissolution(
+            total_mg=total_mg,
+            mg_per_unit=mg_per_unit,
+            v_max=v_max,
+        )
+
+    if dissolution is not None:
+        fraction, dissolve_volume, draw_volume = dissolution
+        if half_band:
+            base_details = details or _pre_round_line(raw, mg_per_unit)
+            details_final = (
+                f"По таблеткам: {CalcResult._fmt_tablets(tablets)}. {base_details}"
+            )
+        elif not close and raw >= PHYSICAL_TABLET_MIN:
+            details_final = details or _exact_share_line(raw, mg_per_unit)
+        else:
+            # Sub-quarter dissolution: steps only, no syringe-limit paragraph.
+            details_final = details
+        return _dissolution_result(
+            total_mg=total_mg,
+            dose_mg_per_kg=dose_mg_per_kg,
+            weight_kg=weight_kg,
+            mg_per_unit=mg_per_unit,
+            fraction=fraction,
+            dissolve_volume=dissolve_volume,
+            draw_volume=draw_volume,
+            warning=_join_warnings(warning, extra_warnings),
+            details=details_final,
+        )
+
+    if close and tablets >= PHYSICAL_TABLET_MIN:
+        fallback_warning = ""
+        if v_max is not None:
+            fallback_warning = (
+                "Не удалось уложить дозу растворением в лимит шприца — "
+                "рассмотрите физическую долю таблетки (¼/½/¾) или другую форму выпуска."
+            )
+        return _physical_tablet_result(
+            total_mg=total_mg,
+            tablets=tablets,
+            dose_mg_per_kg=dose_mg_per_kg,
+            weight_kg=weight_kg,
+            mg_per_unit=mg_per_unit,
+            warning=_join_warnings(warning, extra_warnings + ([fallback_warning] if fallback_warning else [])),
+            details=details,
+            raw=raw,
+        )
+
+    fail_bits = list(extra_warnings)
+    if v_max is None and raw < PHYSICAL_TABLET_MIN:
+        fail_bits.append(
+            f"Доля таблетки {_fmt_qty(raw)} меньше ¼ — растворение недоступно при данном весе. "
+            "Уточните дозу или форму выпуска у врача."
+        )
+    elif v_max is not None:
+        fail_bits.append(
+            "Не удалось уложить дозу растворением в лимит шприца — "
+            "уточните дозу или форму выпуска у врача."
+        )
+    share = details or (
+        _exact_share_line(raw, mg_per_unit)
+        if raw >= PHYSICAL_TABLET_MIN
+        else f"Расчётная доля: {_fmt_qty(raw)} табл. (по {_fmt_qty(mg_per_unit)} мг)."
+    )
+    return CalcResult(
+        ok=True,
+        total_mg=round(total_mg, 4),
+        form="tablet",
+        method="dissolution_failed",
+        dose_mg_per_kg=float(dose_mg_per_kg),
+        weight_kg=float(weight_kg),
+        mg_per_unit=float(mg_per_unit),
+        warning=_join_warnings(warning, fail_bits),
+        details=share,
     )
 
 

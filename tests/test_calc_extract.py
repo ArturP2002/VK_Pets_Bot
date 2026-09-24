@@ -1,9 +1,11 @@
 """Calculator free-text extraction heuristics."""
 from bot.handlers.calculator import (
     _merge_extracts,
+    _missing_message,
     _naive_extract,
     _normalize_extract,
     _required_missing,
+    _show_confirm,
 )
 
 
@@ -74,3 +76,60 @@ def test_merge_dose_not_overwritten_when_converting_tablet_strength():
     merged = _merge_extracts(primary, fallback)
     assert merged["dose_mg_per_kg"] == 10
     assert merged["mg_per_unit"] == 50
+
+
+def test_ampule_without_volume_is_not_tablet_strength():
+    text = "нефопам 1,5мг/кг кролику 2,34 кг ампула 10мг"
+    data = _normalize_extract(_naive_extract(text))
+    assert data["form"] == "solution"
+    assert data["mg_per_unit"] is None
+    assert data["_ampule_mg"] == 10.0
+    assert data["concentration_mg_ml"] is None
+    assert data["dose_mg_per_kg"] == 1.5
+    assert data["weight_kg"] == 2.34
+    assert data["species"] == "кролик"
+    missing = _required_missing(data)
+    assert missing == ["concentration_mg_ml"]
+    message = _missing_message(data, missing)
+    assert "объём ампулы" in message
+    assert "мг в таблетке" not in message
+
+
+def test_ampule_with_volume_sets_concentration():
+    data = _normalize_extract(_naive_extract("ампула 10 мг/2 мл"))
+    assert data["form"] == "solution"
+    assert data["mg_per_unit"] is None
+    assert data["concentration_mg_ml"] == 5.0
+    assert _required_missing(data) == ["weight_kg", "dose_mg_per_kg"]
+
+
+def test_merge_ignores_llm_tablet_mg_for_ampule(monkeypatch):
+    naive = _normalize_extract(_naive_extract("нефопам 1,5мг/кг кролику 2,34 кг ампула 10мг"))
+    llm = {
+        "drug": "нефопам",
+        "species": "кролик",
+        "weight_kg": 2.34,
+        "dose_mg_per_kg": 1.5,
+        "form": "other",
+        "mg_per_unit": 10,
+        "notes": "ампула 10 мг (объем ампулы не указан)",
+    }
+    merged = _merge_extracts(llm, naive)
+    assert merged["form"] == "solution"
+    assert merged["mg_per_unit"] is None
+    assert not merged.get("notes")
+
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(
+        "bot.handlers.calculator.vk.send_message",
+        lambda peer, text, keyboard=None: captured.setdefault("text", text),
+    )
+    monkeypatch.setattr("bot.handlers.calculator.session.set_state", lambda *args, **kwargs: None)
+    merged["_ampule_ml"] = 2.0
+    merged["concentration_mg_ml"] = 5.0
+    _show_confirm(1, 2, merged)
+    text = captured["text"]
+    assert "мг в таблетке" not in text
+    assert "мг в ампуле: 10" in text
+    assert "ампула" in text
+    assert "концентрация: 5" in text

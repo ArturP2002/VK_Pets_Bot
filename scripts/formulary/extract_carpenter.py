@@ -128,6 +128,18 @@ _BARE_NON_DRUG = frozenset(
         "ants",
         "feather",
         "перо",
+        "acid",
+        "acids",
+        "кислота",
+        "кислоты",
+        "essential",
+        "male",
+        "female",
+        "самец",
+        "самка",
+        "самцы",
+        "самки",
+        "ici",
     }
 )
 
@@ -149,6 +161,38 @@ _SPECIES_ONLY_NAMES = {
     "african grey",
     "african gray",
     "african clawed frog",
+    "guinea pig",
+    "guinea pigs",
+    "cavia",
+    "cavia porcellus",
+    "морская свинка",
+    "свинка морская",
+    "rabbit",
+    "rabbits",
+    "кролик",
+    "hamster",
+    "hamsters",
+    "хомяк",
+    "rat",
+    "rats",
+    "крыса",
+    "mouse",
+    "mice",
+    "мышь",
+    "ferret",
+    "хорек",
+    "хорёк",
+    "chinchilla",
+    "шиншилла",
+    "parrot",
+    "попугай",
+    "dog",
+    "dogs",
+    "cat",
+    "cats",
+    "собака",
+    "кошка",
+    "кот",
 }
 _SPECIES_ONLY_RE = re.compile(
     r"(?i)(^african\s+(?:green|grey|gray)\b|\bparrots?\b|\bspp\.?\b)"
@@ -246,7 +290,7 @@ def is_junk_agent_name(name: str) -> bool:
         return True
     lowered = name.lower().strip()
     collapsed = re.sub(r"\s+", "", lowered)
-    if _letter_count(name) < 3:
+    if _letter_count(name) < 4:
         return True
     if collapsed in {"contents", "table"} or re.match(r"^table\d", collapsed):
         return True

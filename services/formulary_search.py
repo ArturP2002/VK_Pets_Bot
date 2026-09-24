@@ -16,7 +16,7 @@ from rapidfuzz import fuzz, process
 import config
 from scripts.formulary.build_db import inn_match_key
 from scripts.formulary.common import fold_match_key, normalize_name, transliterate_ru
-from scripts.formulary.junk_names import is_junk_drug_name
+from scripts.formulary.junk_names import FRAGMENT_MATCH_TOKENS, is_junk_drug_name
 from scripts.formulary.schema import ensure_schema_extensions
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,58 @@ def _is_exact_alias_match(q_norm: str, q_tr: str, alias_norm: str) -> bool:
         return True
     q_fold = fold_match_key(q_norm or q_tr)
     return bool(q_fold and q_fold == fold_match_key(alias_norm))
+
+
+_MIN_PARTIAL_LEN = 5
+_MIN_LENGTH_RATIO = 0.7
+
+
+def _label_tokens(value: str) -> list[str]:
+    return [token for token in re.split(r"[\s/+-]+", value or "") if token]
+
+
+def _is_fragment_label(value: str) -> bool:
+    norm = normalize_name(value or "")
+    if not norm:
+        return True
+    if norm in FRAGMENT_MATCH_TOKENS:
+        return True
+    tokens = _label_tokens(norm)
+    return len(tokens) == 1 and tokens[0] in FRAGMENT_MATCH_TOKENS
+
+
+def _containment_match(q_norm: str, alias_norm: str) -> bool:
+    """
+    Substring hits only when the alias is a whole query token, or the query
+    is a long prefix of an alias token. Blocks «ici» inside «amoxicillin»
+    and «acid» inside «clavulanic acid».
+    """
+    if not q_norm or not alias_norm or q_norm == alias_norm:
+        return False
+    if is_junk_drug_name(alias_norm) or _is_fragment_label(alias_norm):
+        return False
+    q_tokens = _label_tokens(q_norm)
+    if alias_norm in q_tokens:
+        return len(alias_norm) >= _MIN_PARTIAL_LEN
+    if len(q_norm) < _MIN_PARTIAL_LEN or _is_fragment_label(q_norm):
+        return False
+    for token in _label_tokens(alias_norm):
+        if token.startswith(q_norm) and len(q_norm) / len(token) >= _MIN_LENGTH_RATIO:
+            return True
+    return False
+
+
+def _fuzzy_whole_match(query_norm: str, alias_norm: str) -> bool:
+    """Accept fuzzy hits only when the whole strings are close, not a shared stem."""
+    if not query_norm or not alias_norm:
+        return False
+    if is_junk_drug_name(alias_norm) or _is_fragment_label(alias_norm):
+        return False
+    shorter = min(len(query_norm), len(alias_norm))
+    longer = max(len(query_norm), len(alias_norm))
+    if shorter < 4 or shorter / longer < _MIN_LENGTH_RATIO:
+        return False
+    return fuzz.ratio(query_norm, alias_norm) >= 70
 
 
 def _is_exact_canonical_match(q_norm: str, q_tr: str, name_ru: str) -> bool:
@@ -607,7 +659,7 @@ def search_drugs(
                     _has_cyrillic(alias) and not _has_cyrillic(prev[1])
                 ):
                     exact_ids[drug_id] = (100.0, alias, True)
-            elif q_norm and (q_norm in alias_norm or alias_norm in q_norm):
+            elif _containment_match(q_norm, alias_norm) or _containment_match(q_tr, alias_norm):
                 exact_ids.setdefault(drug_id, (92.0, alias, False))
 
         for row in conn.execute(
@@ -685,6 +737,10 @@ def search_drugs(
         for alias_norm, score, idx in fuzzy:
             drug_id, alias, norm, lang, name_en, name_ru, _sources = corpus[idx]
             fuzzy_exact = _is_exact_alias_match(q_norm, q_tr, norm)
+            if not fuzzy_exact and not (
+                _fuzzy_whole_match(q_norm, norm) or _fuzzy_whole_match(q_tr, norm)
+            ):
+                continue
             consider(
                 drug_id,
                 float(score),
